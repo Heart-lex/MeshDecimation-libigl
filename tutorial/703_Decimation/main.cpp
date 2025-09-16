@@ -87,6 +87,42 @@ bool is_vertex_manifold(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F)
 
     return true;
 }
+
+
+void saveSimplifiedMesh(const std::string& original_path,
+    const Eigen::MatrixXd& V,
+    const Eigen::MatrixXi& F)
+{
+    // Desktop path
+    std::string desktop_path = std::string(std::getenv("USERPROFILE")) + "\\Desktop\\";
+
+    // Extract filename without path
+    size_t last_slash = original_path.find_last_of("\\/");
+    std::string filename_with_ext = (last_slash == std::string::npos)
+        ? original_path
+        : original_path.substr(last_slash + 1);
+
+    // Find extension
+    size_t last_dot = filename_with_ext.find_last_of(".");
+    std::string filename = (last_dot == std::string::npos)
+        ? filename_with_ext
+        : filename_with_ext.substr(0, last_dot);
+    std::string extension = (last_dot == std::string::npos)
+        ? ".obj"
+        : filename_with_ext.substr(last_dot);
+
+    // Build new filename
+    std::string out_filename = desktop_path + filename + "_simplified" + extension;
+
+    // Save mesh
+    if (!igl::writeOBJ(out_filename, V, F))
+        std::cerr << "Failed to save simplified mesh." << std::endl;
+    else
+        std::cout << "Simplified mesh saved as " << out_filename << std::endl;
+}
+
+
+int main(int argc, char* argv[])
 {
   using namespace std;
   using namespace Eigen;
@@ -197,6 +233,13 @@ bool is_vertex_manifold(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F)
       case ' ':
         viewer.core().is_animating ^= 1;
         break;
+            case 'S':
+            case's':// Press 'S' to save
+            {
+                saveSimplifiedMesh(filename, V, F);
+                break;
+            }
+            break;
       case 'R':
       case 'r':
         reset();
