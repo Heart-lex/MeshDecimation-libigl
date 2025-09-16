@@ -7,6 +7,16 @@
 // obtain one at http://mozilla.org/MPL/2.0/.
 #include "shortest_edge_and_midpoint.h"
 
+static Eigen::VectorXd g_weights;
+
+namespace igl
+{
+	void set_weights(Eigen::VectorXd& W) {
+		g_weights = W;
+	}
+}
+
+
 IGL_INLINE void igl::shortest_edge_and_midpoint(
   const int e,
   const Eigen::MatrixXd & V,
