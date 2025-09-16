@@ -10,9 +10,83 @@
 #include <Eigen/Core>
 #include <iostream>
 #include <set>
+#include <igl/remove_unreferenced.h>
+#include <igl/writeOBJ.h>
+#include <filesystem>
+#include <string>
+#include <igl/remove_duplicate_vertices.h>
+#include <igl/unique_rows.h>
+//#include <igl/is_vertex_manifold.h>
+#include <igl/is_edge_manifold.h>
+#include <igl/split_nonmanifold.h>
+#include <igl/resolve_duplicated_faces.h>
 
+bool is_vertex_manifold(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F)
+{
+    // Map from vertex to incident faces
+    std::vector<std::vector<int>> vertex_faces(V.rows());
+    for (int f = 0; f < F.rows(); ++f)
+    {
+        for (int j = 0; j < 3; ++j)
+        {
+            vertex_faces[F(f, j)].push_back(f);
+        }
+    }
 
-int main(int argc, char * argv[])
+    // Check each vertex
+    for (int v = 0; v < V.rows(); ++v)
+    {
+        const auto& faces = vertex_faces[v];
+        if (faces.empty()) continue; // isolated vertex, ignore
+
+        // Build adjacency graph of faces around vertex v
+        std::map<int, std::set<int>> face_adjacency;
+        for (int i = 0; i < faces.size(); ++i)
+        {
+            int f1 = faces[i];
+            for (int j = i + 1; j < faces.size(); ++j)
+            {
+                int f2 = faces[j];
+                // Count shared edge
+                int shared = 0;
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b)
+                        if (F(f1, a) == F(f2, b)) shared++;
+                if (shared == 2) // they share an edge
+                {
+                    face_adjacency[f1].insert(f2);
+                    face_adjacency[f2].insert(f1);
+                }
+            }
+        }
+
+        // BFS/DFS to check connectivity
+        std::set<int> visited;
+        std::queue<int> q;
+        q.push(faces[0]);
+        visited.insert(faces[0]);
+        while (!q.empty())
+        {
+            int cf = q.front(); q.pop();
+            for (int nf : face_adjacency[cf])
+            {
+                if (visited.count(nf) == 0)
+                {
+                    visited.insert(nf);
+                    q.push(nf);
+                }
+            }
+        }
+
+        if (visited.size() != faces.size())
+        {
+            // Faces around this vertex are disconnected -> non-manifold
+            return false;
+        }
+    }
+
+    return true;
+}
 {
   using namespace std;
   using namespace Eigen;
