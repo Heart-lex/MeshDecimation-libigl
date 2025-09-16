@@ -124,115 +124,227 @@ void saveSimplifiedMesh(const std::string& original_path,
 
 int main(int argc, char* argv[])
 {
-  using namespace std;
-  using namespace Eigen;
-  using namespace igl;
-  cout<<"Usage: ./703_Decimation_bin [filename.(off|obj|ply)]"<<endl;
-  cout<<"  [space]  toggle animation."<<endl;
-  cout<<"  'r'  reset."<<endl;
-  // Load a closed manifold mesh
-  string filename(TUTORIAL_SHARED_PATH "/fertility.off");
-  if(argc>=2)
-  {
-    filename = argv[1];
-  }
-  MatrixXd V,OV;
-  MatrixXi F,OF;
-  read_triangle_mesh(filename,OV,OF);
+    using namespace std;
+    using namespace Eigen;
+    using namespace igl;
 
-  igl::opengl::glfw::Viewer viewer;
+    // Print usage instructions
+    cout << "Usage: ./703_Decimation_bin [filename.(off|obj|ply)]" << endl;
+    cout << "  [space]  toggle animation." << endl;
+    cout << "  'r'  reset." << endl;
 
-  // Prepare array-based edge data structures and priority queue
-  VectorXi EMAP;
-  MatrixXi E,EF,EI;
-  igl::min_heap< std::tuple<double,int,int> > Q;
-  Eigen::VectorXi EQ;
-  // If an edge were collapsed, we'd collapse it to these points:
-  MatrixXd C;
-  int num_collapsed;
-
-  // Function to reset original mesh and data structures
-  const auto & reset = [&]()
-  {
-    F = OF;
-    V = OV;
-    edge_flaps(F,E,EMAP,EF,EI);
-    C.resize(E.rows(),V.cols());
-    VectorXd costs(E.rows());
-    // https://stackoverflow.com/questions/2852140/priority-queue-clear-method
-    // Q.clear();
-    Q = {};
-    EQ = Eigen::VectorXi::Zero(E.rows());
+    // Default mesh filename if none provided on command line
+    //string filename(TUTORIAL_SHARED_PATH "/Lvl_FirstPerson.obj");
+    string filename(TUTORIAL_SHARED_PATH "/models/level_unreal.obj");
+    if (argc >= 2)
     {
-      Eigen::VectorXd costs(E.rows());
-      igl::parallel_for(E.rows(),[&](const int e)
-      {
-        double cost = e;
-        RowVectorXd p(1,3);
-        shortest_edge_and_midpoint(e,V,F,E,EMAP,EF,EI,cost,p);
-        C.row(e) = p;
-        costs(e) = cost;
-      },10000);
-      for(int e = 0;e<E.rows();e++)
-      {
-        Q.emplace(costs(e),e,0);
-      }
+        // Override default filename with user input
+        filename = argv[1];
     }
 
-    num_collapsed = 0;
-    viewer.data().clear();
-    viewer.data().set_mesh(V,F);
-    viewer.data().set_face_based(true);
-  };
+    //// Matrices to hold vertex positions and face indices (original and working copies)
+    MatrixXd V, OV; // V = current vertices, OV = original vertices
+    MatrixXi F, OF; // F = current faces, OF = original faces
+	
+	// Intermediate matrices for cleaning
+    MatrixXi F_clean; // Cleaned faces after preprocessing
+	MatrixXd V_clean; // Cleaned vertices after preprocessing
+    
+	// Intermediate matrices for manifold processing
+	MatrixXd V_manifold; // Manifold vertices after preprocessing
+	MatrixXi F_manifold; // Manifold faces after preprocessing
 
-  const auto &pre_draw = [&](igl::opengl::glfw::Viewer & viewer)->bool
-  {
-    // If animating then collapse 10% of edges
-    if(viewer.core().is_animating && !Q.empty())
+	VectorXi I, J; // Index mappings
+    VectorXi SVI; // mapping from original to split vertices
+
+    //// Load mesh from file (triangle mesh)
+    read_triangle_mesh(filename, OV, OF);
+
+    //////////////////////////////////////////////////////////
+	// Preprocess mesh to ensure manifoldness ////////////////
+
+    remove_duplicate_vertices(OV, OF, 1e-7, V_clean, I, J, F);
+    resolve_duplicated_faces(F, F_clean, J);
+    remove_unreferenced(V_clean, F_clean, OV, OF, I);
+    split_nonmanifold(OV, OF, V_manifold, F_manifold, SVI);
+
+    OV = V_manifold;
+    OF = F_manifold;
+
+	// End of preprocessing //////////////////////////////////
+    //////////////////////////////////////////////////////////
+
+    //////////////// DEBUG ////////////////
+
+    bool isEdgeManifold = is_edge_manifold(OF);
+    bool isVertexManifold = is_vertex_manifold(OV, OF);
+
+    printf("\nIs the mesh edge-manifold? %s\n", isEdgeManifold ? "Yes!" : "No.");
+    printf("\nIs the mesh vertex-manifold? %s\n", isVertexManifold ? "Yes!" : "No.");
+
+    //// Print original vertices and faces
+    //std::cout << "Original vertices (OV):\n" << OV << std::endl;
+    //std::cout << "Original faces (OF):\n" << OF << std::endl;
+
+    cout << "\nLoaded mesh " << filename << " with " << OV.rows() << " vertices and " << OF.rows() << " faces\n";
+
+    //////////////// DEBUG ////////////////
+
+    // Allocate a vector with as many entries as there are faces
+    Eigen::VectorXd W(OF.rows());
+
+    // Read weights from file
+    std::ifstream fin("C:\\Users\\vortimex\\Desktop\\weights.txt");
+    if (!fin) {
+        std::cerr << "Error: could not open weights file.\n";
+        return -1; // exit if file can't be opened
+    }
+
+    for (int i = 0; i < OF.rows(); ++i)
     {
-      bool something_collapsed = false;
-      // collapse edge
-      const int max_iter = std::ceil(0.01*Q.size());
-      for(int j = 0;j<max_iter;j++)
-      {
-        igl::decimate_pre_collapse_callback always_try;
-        igl::decimate_post_collapse_callback never_care;
-        igl::decimate_trivial_callbacks(always_try,never_care);
-        // Explicit template instanciations expect std::function not raw pointer
-        // Only relevant if IGL_STATIC_LIBRARY is defined
-        const std::function<void (int, Eigen::Matrix<double, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, 1, 0, -1, 1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, double&, Eigen::Matrix<double, 1, -1, 1, 1, -1>&)> cp = shortest_edge_and_midpoint;
-        int e,e1,e2,f1,f2;
-        if(!collapse_least_cost_edge(
-              cp,always_try,never_care,
-              V,F,E,
-              EMAP,EF,EI,
-              Q,EQ,C,
-              e,e1,e2,f1,f2))
+        fin >> W(i);
+    }
+    fin.close();
+
+    cout << W.rows() << endl;
+    cout << OF.rows() << endl;
+
+    // Create an OpenGL viewer window
+    igl::opengl::glfw::Viewer viewer;
+
+    // Data structures for edges and mesh connectivity
+    VectorXi EMAP; // Map edges to edge indices
+    MatrixXi E, EF, EI; // Edges, edge-face adjacency, edge indices per face
+    igl::min_heap< std::tuple<double, int, int> > Q; // Priority queue for edges (cost, edge id, unused)
+    Eigen::VectorXi EQ; // Edge queue index helper
+
+    MatrixXd C; // Candidate collapse points per edge (usually midpoint)
+    int num_collapsed; // Counter of how many edges have been collapsed
+
+    // Lambda function to reset mesh and initialize all data structures
+    const auto& reset = [&]()
         {
-          break;
-        }
-        something_collapsed = true;
-        num_collapsed++;
-      }
+            // Reset faces and vertices to original mesh
+            F = OF;
+            V = OV;
 
-      if(something_collapsed)
-      {
-        viewer.data().clear();
-        viewer.data().set_mesh(V,F);
-        viewer.data().set_face_based(true);
-      }
-    }
-    return false;
-  };
+            // Compute edge data structures for the mesh
+            edge_flaps(F, E, EMAP, EF, EI);
 
-  const auto &key_down =
-    [&](igl::opengl::glfw::Viewer &viewer,unsigned char key,int mod)->bool
-  {
-    switch(key)
-    {
-      case ' ':
-        viewer.core().is_animating ^= 1;
-        break;
+            // Resize collapse points array to match number of edges
+            C.resize(E.rows(), V.cols());
+            VectorXd costs(E.rows());
+            // https://stackoverflow.com/questions/2852140/priority-queue-clear-method
+            // Q.clear();
+            // Clear priority queue by reinitializing empty queue
+            Q = {};
+
+            // Initialize EQ helper vector (one entry per edge) to zeros
+            EQ = Eigen::VectorXi::Zero(E.rows());
+            {
+                // Temporary vector to hold edge costs
+                Eigen::VectorXd costs(E.rows());
+
+				// Set face weights for decimation
+                igl::set_weights(W);
+
+                // Compute cost and collapse points for each edge in parallel
+                igl::parallel_for(E.rows(), [&](const int e)
+                    {
+                        double cost = e; // Initialize cost (this will be overwritten)
+                        RowVectorXd p(1, 3); // To store midpoint position
+
+                        // Compute shortest edge length and midpoint, update cost and collapse point
+                        shortest_edge_and_midpoint(e, V, F, E, EMAP, EF, EI, cost, p);
+
+                        C.row(e) = p; // Store candidate collapse point for edge e
+                        costs(e) = cost; // Store computed cost
+                    }, 10000); // Parallelize over edges, with 10,000 threads per batch
+
+                // Push all edges into the priority queue with their cost
+                for (int e = 0; e < E.rows(); e++)
+                {
+                    Q.emplace(costs(e), e, 0);
+                }
+            }
+
+            // Reset the collapsed edges count
+            num_collapsed = 0;
+
+            // Clear any previous mesh data from viewer and set new mesh
+            viewer.data().clear();
+            viewer.data().set_mesh(V, F);
+            viewer.data().set_face_based(true); // Use face-based rendering
+        };
+
+    // Lambda function called before every draw frame in the viewer
+    const auto& pre_draw = [&](igl::opengl::glfw::Viewer& viewer)->bool
+        {
+            // Only run if animation is toggled on and there are edges to collapse
+            if (viewer.core().is_animating && !Q.empty())
+            {
+                // Toggle animation flag off after one iteration (to step collapse one batch)
+                viewer.core().is_animating ^= 1;
+
+                bool something_collapsed = false;
+
+                // Decide how many edges to collapse in this frame: 60% of remaining edges
+                const int max_iter = std::ceil(0.6 * Q.size());
+                for (int j = 0; j < max_iter; j++)
+                {
+                    // Callbacks controlling whether collapse is allowed / post-processing
+                    igl::decimate_pre_collapse_callback always_try; // Always try to collapse edges
+                    igl::decimate_post_collapse_callback never_care;  // No special post-collapse handling
+                    igl::decimate_trivial_callbacks(always_try, never_care);
+
+                    // Explicit template instanciations expect std::function not raw pointer
+                    // Only relevant if IGL_STATIC_LIBRARY is defined
+                    // Collapse function callback that computes cost and midpoint for collaps
+                    const std::function<void(int, Eigen::Matrix<double, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, 1, 0, -1, 1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, double&, Eigen::Matrix<double, 1, -1, 1, 1, -1>&)> cp = shortest_edge_and_midpoint;
+
+                    // Variables to receive collapse results (edge and faces involved)
+                    int e, e1, e2, f1, f2;
+
+                    // Try collapsing the edge with lowest cost from priority queue
+                    if (!collapse_least_cost_edge(
+                        cp, always_try, never_care,
+                        V, F, E,
+                        EMAP, EF, EI,
+                        Q, EQ, C,
+                        e, e1, e2, f1, f2))
+                    {
+                        // If collapse failed, exit loop early
+                        break;
+                    }
+
+                    // Record that a collapse happened
+                    something_collapsed = true;
+                    num_collapsed++;
+                }
+
+                // If any edge was collapsed, update the viewer mesh
+                if (something_collapsed)
+                {
+                    viewer.data().clear();
+                    viewer.data().set_mesh(V, F);
+                    viewer.data().set_face_based(true);
+                }
+            }
+
+            // Returning false indicates no further viewer updates needed now
+            return false;
+        };
+
+    // Keyboard input callback handler
+    const auto& key_down =
+        [&](igl::opengl::glfw::Viewer& viewer, unsigned char key, int mod)->bool
+        {
+            switch (key)
+            {
+            case ' ':
+                // Toggle animation on/off when space bar pressed
+                viewer.core().is_animating ^= 1;
+                break;
             case 'S':
             case's':// Press 'S' to save
             {
@@ -240,20 +352,30 @@ int main(int argc, char* argv[])
                 break;
             }
             break;
-      case 'R':
-      case 'r':
-        reset();
-        break;
-      default:
-        return false;
-    }
-    return true;
-  };
+            case 'R':
+            case 'r':
+                // Reset the mesh and data structures when 'r' pressed
+                reset();
+                break;
+            default:
+                return false; // Other keys not handled here
+            }
+            return true;
+        };
 
-  reset();
-  viewer.core().background_color.setConstant(1);
-  viewer.core().is_animating = true;
-  viewer.callback_key_down = key_down;
-  viewer.callback_pre_draw = pre_draw;
-  return viewer.launch();
+    // Initialize everything before launching viewer
+    reset();
+
+    // Set viewer background color to white
+    viewer.core().background_color.setConstant(1);
+
+    // Start animation by default
+    viewer.core().is_animating = false;
+
+    // Assign callbacks for key presses and pre-draw frame updates
+    viewer.callback_key_down = key_down;
+    viewer.callback_pre_draw = pre_draw;
+
+    // Launch the interactive OpenGL viewer
+    return viewer.launch();
 }
