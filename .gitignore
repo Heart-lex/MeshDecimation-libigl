@@ -51,3 +51,5 @@ LibiglOptions.cmake
 dox/
 latex/
 scripts/
+/.vs/MeshDecimation-libigl/v17
+/.vs
