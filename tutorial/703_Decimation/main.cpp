@@ -16,10 +16,8 @@
 #include <string>
 #include <igl/remove_duplicate_vertices.h>
 #include <igl/unique_rows.h>
-//#include <igl/is_vertex_manifold.h>
 #include <igl/is_edge_manifold.h>
 #include <igl/split_nonmanifold.h>
-#include <igl/resolve_duplicated_faces.h>
 
 bool is_vertex_manifold(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F)
 {
@@ -91,7 +89,7 @@ bool is_vertex_manifold(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F)
 
 void saveSimplifiedMesh(const std::string& original_path,
     const Eigen::MatrixXd& V,
-    const Eigen::MatrixXi& F)
+    const Eigen::MatrixXi& F, bool removeDuplicates)
 {
     // Desktop path
     std::string desktop_path = std::string(std::getenv("USERPROFILE")) + "\\Desktop\\";
@@ -111,8 +109,17 @@ void saveSimplifiedMesh(const std::string& original_path,
         ? ".obj"
         : filename_with_ext.substr(last_dot);
 
+    std::string out_filename;
+
     // Build new filename
-    std::string out_filename = desktop_path + filename + "_simplified" + extension;
+    if (removeDuplicates)
+    {
+        out_filename = desktop_path + filename + "_clean" + extension;
+    }
+    else
+    {
+        out_filename = desktop_path + filename + "_simplified" + extension;
+    }
 
     // Save mesh
     if (!igl::writeOBJ(out_filename, V, F))
@@ -120,6 +127,7 @@ void saveSimplifiedMesh(const std::string& original_path,
     else
         std::cout << "Simplified mesh saved as " << out_filename << std::endl;
 }
+
 
 
 int main(int argc, char* argv[])
@@ -134,53 +142,59 @@ int main(int argc, char* argv[])
     cout << "  'r'  reset." << endl;
 
     // Default mesh filename if none provided on command line
-    //string filename(TUTORIAL_SHARED_PATH "/Lvl_FirstPerson.obj");
-    string filename(TUTORIAL_SHARED_PATH "/models/level_unreal.obj");
+    string filename(TUTORIAL_SHARED_PATH "/models/level/obj/level_enclosed.obj");
+    string removeDuplicates = "true";
     if (argc >= 2)
     {
         // Override default filename with user input
         filename = argv[1];
+        removeDuplicates = argv[2];
+
     }
 
     //// Matrices to hold vertex positions and face indices (original and working copies)
     MatrixXd V, OV; // V = current vertices, OV = original vertices
     MatrixXi F, OF; // F = current faces, OF = original faces
-	
-	// Intermediate matrices for cleaning
-    MatrixXi F_clean; // Cleaned faces after preprocessing
-	MatrixXd V_clean; // Cleaned vertices after preprocessing
-    
-	// Intermediate matrices for manifold processing
-	MatrixXd V_manifold; // Manifold vertices after preprocessing
-	MatrixXi F_manifold; // Manifold faces after preprocessing
 
-	VectorXi I, J; // Index mappings
+    // Intermediate matrices for cleaning
+    MatrixXi F_clean; // Cleaned faces after preprocessing
+    MatrixXd V_clean; // Cleaned vertices after preprocessing
+
+    // Intermediate matrices for manifold processing
+    MatrixXd V_manifold; // Manifold vertices after preprocessing
+    MatrixXi F_manifold; // Manifold faces after preprocessing
+
+    VectorXi I, J; // Index mappings
     VectorXi SVI; // mapping from original to split vertices
 
     //// Load mesh from file (triangle mesh)
     read_triangle_mesh(filename, OV, OF);
 
-    //////////////////////////////////////////////////////////
-	// Preprocess mesh to ensure manifoldness ////////////////
+    if (removeDuplicates == "true")
+    {
+        igl::remove_duplicate_vertices(OV, OF, 1e-7, V_clean, I, J, F_clean);
+        igl::remove_unreferenced(V_clean, F_clean, OV, OF, I);
 
-    remove_duplicate_vertices(OV, OF, 1e-7, V_clean, I, J, F);
-    resolve_duplicated_faces(F, F_clean, J);
-    remove_unreferenced(V_clean, F_clean, OV, OF, I);
-    split_nonmanifold(OV, OF, V_manifold, F_manifold, SVI);
+        OV = V_clean;
+        OF = F_clean;
 
-    OV = V_manifold;
-    OF = F_manifold;
+        Eigen::MatrixXd V_manifold;
+        Eigen::MatrixXi F_manifold;
+        Eigen::VectorXi SVI; // mapping from original to split vertices
 
-	// End of preprocessing //////////////////////////////////
-    //////////////////////////////////////////////////////////
+        igl::split_nonmanifold(OV, OF, V_manifold, F_manifold, SVI);
+
+        bool isEdgeManifold = igl::is_edge_manifold(OF);
+        bool isVertexManifold = is_vertex_manifold(OV, OF);
+
+        printf("Is the mesh edge-manifold? %s\n", isEdgeManifold ? "Yes" : "No");
+        printf("Is the mesh vertex-manifold? %s\n", isVertexManifold ? "Yes" : "No");
+
+        //saveSimplifiedMesh(filename, OV, OF, true);
+    }
+
 
     //////////////// DEBUG ////////////////
-
-    bool isEdgeManifold = is_edge_manifold(OF);
-    bool isVertexManifold = is_vertex_manifold(OV, OF);
-
-    printf("\nIs the mesh edge-manifold? %s\n", isEdgeManifold ? "Yes!" : "No.");
-    printf("\nIs the mesh vertex-manifold? %s\n", isVertexManifold ? "Yes!" : "No.");
 
     //// Print original vertices and faces
     //std::cout << "Original vertices (OV):\n" << OV << std::endl;
@@ -194,7 +208,7 @@ int main(int argc, char* argv[])
     Eigen::VectorXd W(OF.rows());
 
     // Read weights from file
-    std::ifstream fin("C:\\Users\\vortimex\\Desktop\\weights.txt");
+    std::ifstream fin("C:\\Users\\vortimex\\Desktop\\level_enclosed_weights.txt");
     if (!fin) {
         std::cerr << "Error: could not open weights file.\n";
         return -1; // exit if file can't be opened
@@ -245,7 +259,7 @@ int main(int argc, char* argv[])
                 // Temporary vector to hold edge costs
                 Eigen::VectorXd costs(E.rows());
 
-				// Set face weights for decimation
+                // Set face weights for decimation
                 igl::set_weights(W);
 
                 // Compute cost and collapse points for each edge in parallel
@@ -345,10 +359,10 @@ int main(int argc, char* argv[])
                 // Toggle animation on/off when space bar pressed
                 viewer.core().is_animating ^= 1;
                 break;
-            case 'S':
-            case's':// Press 'S' to save
+            case 'V':
+            case'v':// Press 'V' or 'v' to save the mesh
             {
-                saveSimplifiedMesh(filename, V, F);
+                saveSimplifiedMesh(filename, V, F, false);
                 break;
             }
             break;
