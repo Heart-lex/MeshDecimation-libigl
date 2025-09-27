@@ -142,7 +142,7 @@ int main(int argc, char* argv[])
     cout << "  'r'  reset." << endl;
 
     // Default mesh filename if none provided on command line
-    string filename(TUTORIAL_SHARED_PATH "/models/level/obj/level_enclosed.obj");
+    string filename(TUTORIAL_SHARED_PATH "/level_enclosed_v2.obj");
     string removeDuplicates = "true";
     if (argc >= 2)
     {
@@ -208,7 +208,7 @@ int main(int argc, char* argv[])
     Eigen::VectorXd W(OF.rows());
 
     // Read weights from file
-    std::ifstream fin("C:\\Users\\vortimex\\Desktop\\level_enclosed_weights.txt");
+    std::ifstream fin(std::string(std::getenv("USERPROFILE")) + "\\Desktop\\level_enclosed_v2_weights.txt");
     if (!fin) {
         std::cerr << "Error: could not open weights file.\n";
         return -1; // exit if file can't be opened
@@ -298,7 +298,7 @@ int main(int argc, char* argv[])
             if (viewer.core().is_animating && !Q.empty())
             {
                 // Toggle animation flag off after one iteration (to step collapse one batch)
-                viewer.core().is_animating ^= 1;
+                //viewer.core().is_animating ^= 1;
 
                 bool something_collapsed = false;
 
@@ -384,7 +384,7 @@ int main(int argc, char* argv[])
     viewer.core().background_color.setConstant(1);
 
     // Start animation by default
-    viewer.core().is_animating = false;
+    viewer.core().is_animating = true;
 
     // Assign callbacks for key presses and pre-draw frame updates
     viewer.callback_key_down = key_down;
