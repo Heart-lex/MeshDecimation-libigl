@@ -80,12 +80,12 @@ Eigen::MatrixXd face_weights_to_vertex_colors(
 int main(int argc, char *argv[])
 {
   // Load a mesh in OBJ format
-  std::string filename(TUTORIAL_SHARED_PATH "/level_enclosed_v2.obj");
+  std::string filename(TUTORIAL_SHARED_PATH "/models/san_miguel/san_miguel.obj");
 
   igl::read_triangle_mesh(filename, V, F);
 
   // Read weights from file
-  std::ifstream fin(std::string(std::getenv("USERPROFILE")) + "\\Desktop\\level_enclosed_v2_weights.txt");
+  std::ifstream fin(std::string(std::getenv("USERPROFILE")) + "\\Desktop\\san_miguel_weights.txt");
   if (!fin) {
       std::cerr << "Error: could not open weights file.\n";
       return -1; // exit if file can't be opened

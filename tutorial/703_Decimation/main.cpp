@@ -129,6 +129,72 @@ void saveSimplifiedMesh(const std::string& original_path,
 }
 
 
+// Check if edge has adjacent faces with zero/low weights
+bool hasZeroWeightAdjacent(const Eigen::MatrixXi& F, const Eigen::VectorXd& W,
+    const Eigen::MatrixXi& E, const Eigen::MatrixXi& EF, int edge_id)
+{
+    // Get faces adjacent to this edge
+    int f1 = EF(edge_id, 0);
+    int f2 = EF(edge_id, 1);
+
+    // Check if either face has very low weight (invisible/structural)
+    if (f1 >= 0 && W(f1) < 0.001) return true;
+    if (f2 >= 0 && W(f2) < 0.001) return true;
+
+    return false;
+
+}
+
+
+// === Utility: Compute face normal ===
+Eigen::Vector3d faceNormal(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, int f)
+{
+    Eigen::Vector3d v0 = V.row(F(f, 0)).transpose();
+    Eigen::Vector3d v1 = V.row(F(f, 1)).transpose();
+    Eigen::Vector3d v2 = V.row(F(f, 2)).transpose();
+    return (v1 - v0).cross(v2 - v0).normalized();
+}
+
+
+// Check if edge is structurally important
+bool isStructurallyImportant(
+    const Eigen::MatrixXd& V,
+    const Eigen::MatrixXi& F,
+    const Eigen::MatrixXi& E,
+    const Eigen::MatrixXi& EF,
+	const Eigen::VectorXd& W,
+    int edge_id)
+{
+    // --- 1. Boundary edge check (most important!) ---
+    int f1 = EF(edge_id, 0);
+    int f2 = EF(edge_id, 1);
+
+    // If only one face adjacent, it's a boundary edge - PROTECT IT!
+    if (f1 < 0 || f2 < 0) {
+        return true;
+    }
+
+    // --- 2. Sharp edge check ---
+    if (f1 >= 0 && f2 >= 0)
+    {
+        Eigen::Vector3d n1 = faceNormal(V, F, f1);
+        Eigen::Vector3d n2 = faceNormal(V, F, f2);
+        double dot = n1.dot(n2);
+
+        // Protect sharp edges (angle > 60 degrees)
+        if (dot < 0.5) return true;
+    }
+
+    // --- 3. Very long edges ---
+    int v1 = E(edge_id, 0);
+    int v2 = E(edge_id, 1);
+    double edge_length = (V.row(v1) - V.row(v2)).norm();
+    if (edge_length > 10.0) return true; // Reduced threshold
+
+    return false;
+
+}
+
 
 int main(int argc, char* argv[])
 {
@@ -142,7 +208,7 @@ int main(int argc, char* argv[])
     cout << "  'r'  reset." << endl;
 
     // Default mesh filename if none provided on command line
-    string filename(TUTORIAL_SHARED_PATH "/level_enclosed_v2.obj");
+    string filename(TUTORIAL_SHARED_PATH "/models/san_miguel/san_miguel.obj");
     string removeDuplicates = "true";
     if (argc >= 2)
     {
@@ -193,7 +259,6 @@ int main(int argc, char* argv[])
         //saveSimplifiedMesh(filename, OV, OF, true);
     }
 
-
     //////////////// DEBUG ////////////////
 
     //// Print original vertices and faces
@@ -208,7 +273,7 @@ int main(int argc, char* argv[])
     Eigen::VectorXd W(OF.rows());
 
     // Read weights from file
-    std::ifstream fin(std::string(std::getenv("USERPROFILE")) + "\\Desktop\\level_enclosed_v2_weights.txt");
+    std::ifstream fin(std::string(std::getenv("USERPROFILE")) + "\\Desktop\\san_miguel_weights.txt");
     if (!fin) {
         std::cerr << "Error: could not open weights file.\n";
         return -1; // exit if file can't be opened
@@ -242,8 +307,18 @@ int main(int argc, char* argv[])
             F = OF;
             V = OV;
 
+            //if (W.rows() != F.rows()) {
+            //    std::cerr << "ERROR: Weight/Face size mismatch!" << std::endl;
+            //    return;
+            //}
+
             // Compute edge data structures for the mesh
             edge_flaps(F, E, EMAP, EF, EI);
+
+            //if (E.rows() == 0) {
+            //    std::cerr << "ERROR: No edges found!" << std::endl;
+            //    return;
+            //}
 
             // Resize collapse points array to match number of edges
             C.resize(E.rows(), V.cols());
@@ -268,19 +343,29 @@ int main(int argc, char* argv[])
                         double cost = e; // Initialize cost (this will be overwritten)
                         RowVectorXd p(1, 3); // To store midpoint position
 
+                        // Any edge touching a zero-weight (not visible) face will be protected
+                        if (hasZeroWeightAdjacent(F, W, E, EF, e))
+                        {
+                            costs(e) = std::numeric_limits<double>::max();
+                            C.row(e) = (V.row(E(e, 0)) + V.row(E(e, 1))) * 0.5;
+                            return;
+                        }
+
                         // Compute shortest edge length and midpoint, update cost and collapse point
                         shortest_edge_and_midpoint(e, V, F, E, EMAP, EF, EI, cost, p);
 
                         C.row(e) = p; // Store candidate collapse point for edge e
                         costs(e) = cost; // Store computed cost
-                    }, 10000); // Parallelize over edges, with 10,000 threads per batch
+                }, 10000);
 
-                // Push all edges into the priority queue with their cost
-                for (int e = 0; e < E.rows(); e++)
-                {
-                    Q.emplace(costs(e), e, 0);
-                }
+            } 
+
+            // Push all edges into the priority queue with their cost
+            for (int e = 0; e < E.rows(); e++)
+            {
+                Q.emplace(costs(e), e, 0);
             }
+           
 
             // Reset the collapsed edges count
             num_collapsed = 0;
@@ -307,9 +392,31 @@ int main(int argc, char* argv[])
                 for (int j = 0; j < max_iter; j++)
                 {
                     // Callbacks controlling whether collapse is allowed / post-processing
-                    igl::decimate_pre_collapse_callback always_try; // Always try to collapse edges
+
+                    // Custom pre-collapse callback with protection
+                    igl::decimate_pre_collapse_callback protected_pre_collapse = [&](
+                        const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
+                        const Eigen::MatrixXi& E, const Eigen::VectorXi& EMAP,
+                        const Eigen::MatrixXi& EF, const Eigen::MatrixXi& EI,
+                        const igl::min_heap<std::tuple<double, int, int>>& Q,
+                        const Eigen::VectorXi& EQ, const Eigen::MatrixXd& C,
+                        const int e) -> bool
+                        {
+                            if (hasZeroWeightAdjacent(F, W, E, EF, e)) {
+                                return false; // Prevent collapse
+                            }
+
+                            if (isStructurallyImportant(V, F, E, EF, W, e)) {
+                                return false; // Prevent collapse
+                            }
+
+                            return true; // Allow collapse
+                        };
+
+                    // The following is no longer needed since we're doing a protected pre-collapse check now
+                    //igl::decimate_pre_collapse_callback always_try; // Always try to collapse edges
                     igl::decimate_post_collapse_callback never_care;  // No special post-collapse handling
-                    igl::decimate_trivial_callbacks(always_try, never_care);
+                    igl::decimate_trivial_callbacks(protected_pre_collapse, never_care);
 
                     // Explicit template instanciations expect std::function not raw pointer
                     // Only relevant if IGL_STATIC_LIBRARY is defined
@@ -321,7 +428,7 @@ int main(int argc, char* argv[])
 
                     // Try collapsing the edge with lowest cost from priority queue
                     if (!collapse_least_cost_edge(
-                        cp, always_try, never_care,
+                        cp, protected_pre_collapse, never_care,
                         V, F, E,
                         EMAP, EF, EI,
                         Q, EQ, C,
@@ -384,7 +491,7 @@ int main(int argc, char* argv[])
     viewer.core().background_color.setConstant(1);
 
     // Start animation by default
-    viewer.core().is_animating = true;
+    viewer.core().is_animating = false;
 
     // Assign callbacks for key presses and pre-draw frame updates
     viewer.callback_key_down = key_down;
