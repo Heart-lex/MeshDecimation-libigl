@@ -86,6 +86,94 @@ bool is_vertex_manifold(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F)
     return true;
 }
 
+// Check if edge has adjacent faces with zero/low weights (structural elements)
+bool hasLowWeightAdjacent(const Eigen::MatrixXi& F, const Eigen::VectorXd& W,
+    const Eigen::MatrixXi& E, const Eigen::MatrixXi& EF, int edge_id)
+{
+    if (edge_id < 0 || edge_id >= EF.rows()) return false;
+
+    int f1 = EF(edge_id, 0);
+    int f2 = EF(edge_id, 1);
+
+    // Protect edges adjacent to low-weight faces (walls/floors)
+    if (f1 >= 0 && f1 < W.rows() && W(f1) < 0.1) return true;  // Adjust threshold as needed
+    if (f2 >= 0 && f2 < W.rows() && W(f2) < 0.1) return true;
+
+    return false;
+}
+
+// Compute face normal
+Eigen::Vector3d faceNormal(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, int f)
+{
+    if (f < 0 || f >= F.rows()) return Eigen::Vector3d(0, 0, 1);
+
+    int v0 = F(f, 0), v1 = F(f, 1), v2 = F(f, 2);
+    if (v0 >= V.rows() || v1 >= V.rows() || v2 >= V.rows())
+        return Eigen::Vector3d(0, 0, 1);
+
+    Eigen::Vector3d p0 = V.row(v0).transpose();
+    Eigen::Vector3d p1 = V.row(v1).transpose();
+    Eigen::Vector3d p2 = V.row(v2).transpose();
+
+    Eigen::Vector3d normal = (p1 - p0).cross(p2 - p0);
+    double norm = normal.norm();
+    return (norm > 1e-10) ? normal / norm : Eigen::Vector3d(0, 0, 1);
+}
+
+// Check if edge is structurally important (boundary, sharp, or connects important faces)
+bool isStructurallyImportant(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
+    const Eigen::MatrixXi& E, const Eigen::MatrixXi& EF,
+    const Eigen::VectorXd& W, int edge_id)
+{
+    if (edge_id < 0 || edge_id >= EF.rows()) return true;
+
+    int f1 = EF(edge_id, 0);
+    int f2 = EF(edge_id, 1);
+
+    // 1. Boundary edges (only one adjacent face) - PROTECT!
+    if (f1 < 0 || f2 < 0) return true;
+
+    // 2. Edges with low-weight adjacent faces - PROTECT!
+    if (hasLowWeightAdjacent(F, W, E, EF, edge_id)) return true;
+
+    // 3. Sharp edges (large angle between face normals) - PROTECT!
+    if (f1 >= 0 && f1 < F.rows() && f2 >= 0 && f2 < F.rows()) {
+        Eigen::Vector3d n1 = faceNormal(V, F, f1);
+        Eigen::Vector3d n2 = faceNormal(V, F, f2);
+        double dot = n1.dot(n2);
+
+        // Protect edges with angle > 45 degrees (dot < 0.707)
+        if (dot < 0.707) return true;
+    }
+
+    // 4. Very long edges that might be structural - PROTECT!
+    if (edge_id < E.rows()) {
+        int v1 = E(edge_id, 0);
+        int v2 = E(edge_id, 1);
+        if (v1 >= 0 && v1 < V.rows() && v2 >= 0 && v2 < V.rows()) {
+            double edge_length = (V.row(v1) - V.row(v2)).norm();
+            if (edge_length > 5.0) return true; // Adjust threshold as needed
+        }
+    }
+
+    return false;
+}
+
+// Check if faces are likely floors (horizontal) or walls (vertical)
+bool isFloorOrWall(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, int face_id)
+{
+    if (face_id < 0 || face_id >= F.rows()) return false;
+
+    Eigen::Vector3d normal = faceNormal(V, F, face_id);
+
+    // Floor: normal points mostly up (Y-axis)
+    if (std::abs(normal.y()) > 0.8) return true;
+
+    // Wall: normal is mostly horizontal (low Y component)
+    if (std::abs(normal.y()) < 0.3) return true;
+
+    return false;
+}
 
 void saveSimplifiedMesh(const std::string& original_path,
     const Eigen::MatrixXd& V,
@@ -268,6 +356,21 @@ int main(int argc, char* argv[])
                         double cost = e; // Initialize cost (this will be overwritten)
                         RowVectorXd p(1, 3); // To store midpoint position
 
+                        if (isStructurallyImportant(V, F, E, EF, W, e))
+                        {
+                            // Set very high cost to prevent collapse
+                            costs(e) = std::numeric_limits<double>::max();
+
+                            // Set safe collapse point (midpoint)
+                            if (e < E.rows() && E(e, 0) < V.rows() && E(e, 1) < V.rows()) {
+                                C.row(e) = (V.row(E(e, 0)) + V.row(E(e, 1))) * 0.5;
+                            }
+                            else {
+                                C.row(e) = Eigen::RowVectorXd::Zero(3);
+                            }
+                            return;
+                        }
+
                         // Compute shortest edge length and midpoint, update cost and collapse point
                         shortest_edge_and_midpoint(e, V, F, E, EMAP, EF, EI, cost, p);
 
@@ -307,36 +410,52 @@ int main(int argc, char* argv[])
                 for (int j = 0; j < max_iter; j++)
                 {
                     // Callbacks controlling whether collapse is allowed / post-processing
-                    igl::decimate_pre_collapse_callback always_try; // Always try to collapse edges
-                    igl::decimate_post_collapse_callback never_care;  // No special post-collapse handling
-                    igl::decimate_trivial_callbacks(always_try, never_care);
+                    igl::decimate_pre_collapse_callback protected_pre_collapse = [&](
+                        const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
+                        const Eigen::MatrixXi& E, const Eigen::VectorXi& EMAP,
+                        const Eigen::MatrixXi& EF, const Eigen::MatrixXi& EI,
+                        const igl::min_heap<std::tuple<double, int, int>>& Q,
+                        const Eigen::VectorXi& EQ, const Eigen::MatrixXd& C,
+                        const int e) -> bool
+                        {
+                            // Prevent collapse of structurally important edges
+                            if (isStructurallyImportant(V, F, E, EF, W, e)) {
+                                return false; // BLOCK collapse
+                            }
 
-                    // Explicit template instanciations expect std::function not raw pointer
-                    // Only relevant if IGL_STATIC_LIBRARY is defined
-                    // Collapse function callback that computes cost and midpoint for collaps
+                            // Additional check: prevent collapse if it would affect floor/wall faces
+                            if (e >= 0 && e < EF.rows()) {
+                                int f1 = EF(e, 0);
+                                int f2 = EF(e, 1);
+
+                                if ((f1 >= 0 && isFloorOrWall(V, F, f1)) ||
+                                    (f2 >= 0 && isFloorOrWall(V, F, f2))) {
+                                    return false; // BLOCK collapse
+                                }
+                            }
+
+                            return true; // ALLOW collapse
+                        };
+
+                    igl::decimate_post_collapse_callback never_care;
+                    igl::decimate_trivial_callbacks(protected_pre_collapse, never_care);
+
                     const std::function<void(int, Eigen::Matrix<double, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, 1, 0, -1, 1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, double&, Eigen::Matrix<double, 1, -1, 1, 1, -1>&)> cp = shortest_edge_and_midpoint;
 
-                    // Variables to receive collapse results (edge and faces involved)
                     int e, e1, e2, f1, f2;
 
-                    // Try collapsing the edge with lowest cost from priority queue
                     if (!collapse_least_cost_edge(
-                        cp, always_try, never_care,
-                        V, F, E,
-                        EMAP, EF, EI,
-                        Q, EQ, C,
+                        cp, protected_pre_collapse, never_care,
+                        V, F, E, EMAP, EF, EI, Q, EQ, C,
                         e, e1, e2, f1, f2))
                     {
-                        // If collapse failed, exit loop early
                         break;
                     }
 
-                    // Record that a collapse happened
                     something_collapsed = true;
                     num_collapsed++;
                 }
 
-                // If any edge was collapsed, update the viewer mesh
                 if (something_collapsed)
                 {
                     viewer.data().clear();
@@ -344,9 +463,8 @@ int main(int argc, char* argv[])
                     viewer.data().set_face_based(true);
                 }
             }
-
-            // Returning false indicates no further viewer updates needed now
             return false;
+
         };
 
     // Keyboard input callback handler
