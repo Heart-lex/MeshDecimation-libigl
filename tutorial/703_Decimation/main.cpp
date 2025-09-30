@@ -130,33 +130,36 @@ bool isStructurallyImportant(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
     int f1 = EF(edge_id, 0);
     int f2 = EF(edge_id, 1);
 
-    // 1. Boundary edges (only one adjacent face) - PROTECT!
+    // Boundary edges (only one adjacent face) 
     if (f1 < 0 || f2 < 0) return true;
 
-    // 2. Edges with low-weight adjacent faces - PROTECT!
-    if (hasLowWeightAdjacent(F, W, E, EF, edge_id)) return true;
+    // Only protect EXTREMELY low weight faces (near zero)
+    if (f1 >= 0 && f1 < W.rows() && W(f1) < 0.01) return true;
+    if (f2 >= 0 && f2 < W.rows() && W(f2) < 0.01) return true;
 
-    // 3. Sharp edges (large angle between face normals) - PROTECT!
+    // Sharp edges (very sharp angles only)
     if (f1 >= 0 && f1 < F.rows() && f2 >= 0 && f2 < F.rows()) {
         Eigen::Vector3d n1 = faceNormal(V, F, f1);
         Eigen::Vector3d n2 = faceNormal(V, F, f2);
         double dot = n1.dot(n2);
 
-        // Protect edges with angle > 45 degrees (dot < 0.707)
-        if (dot < 0.707) return true;
+        // Only protect very sharp edges (> 60 degrees, dot < 0.5)
+        if (dot < 0.5) return true;
     }
 
-    // 4. Very long edges that might be structural - PROTECT!
+    // Very long edges
     if (edge_id < E.rows()) {
         int v1 = E(edge_id, 0);
         int v2 = E(edge_id, 1);
         if (v1 >= 0 && v1 < V.rows() && v2 >= 0 && v2 < V.rows()) {
             double edge_length = (V.row(v1) - V.row(v2)).norm();
-            if (edge_length > 5.0) return true; // Adjust threshold as needed
+            if (edge_length > 5.0) return true;
         }
     }
 
     return false;
+
+
 }
 
 // Check if faces are likely floors (horizontal) or walls (vertical)
@@ -410,42 +413,20 @@ int main(int argc, char* argv[])
                 for (int j = 0; j < max_iter; j++)
                 {
                     // Callbacks controlling whether collapse is allowed / post-processing
-                    igl::decimate_pre_collapse_callback protected_pre_collapse = [&](
-                        const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
-                        const Eigen::MatrixXi& E, const Eigen::VectorXi& EMAP,
-                        const Eigen::MatrixXi& EF, const Eigen::MatrixXi& EI,
-                        const igl::min_heap<std::tuple<double, int, int>>& Q,
-                        const Eigen::VectorXi& EQ, const Eigen::MatrixXd& C,
-                        const int e) -> bool
-                        {
-                            // Prevent collapse of structurally important edges
-                            if (isStructurallyImportant(V, F, E, EF, W, e)) {
-                                return false; // BLOCK collapse
-                            }
+                    igl::decimate_pre_collapse_callback always_try; // Always try to collapse edges
 
-                            // Additional check: prevent collapse if it would affect floor/wall faces
-                            if (e >= 0 && e < EF.rows()) {
-                                int f1 = EF(e, 0);
-                                int f2 = EF(e, 1);
 
-                                if ((f1 >= 0 && isFloorOrWall(V, F, f1)) ||
-                                    (f2 >= 0 && isFloorOrWall(V, F, f2))) {
-                                    return false; // BLOCK collapse
-                                }
-                            }
+                    igl::decimate_post_collapse_callback never_care;  // No special post-collapse handling
 
-                            return true; // ALLOW collapse
-                        };
 
-                    igl::decimate_post_collapse_callback never_care;
-                    igl::decimate_trivial_callbacks(protected_pre_collapse, never_care);
+                    igl::decimate_trivial_callbacks(always_try, never_care);
 
                     const std::function<void(int, Eigen::Matrix<double, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, 1, 0, -1, 1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, double&, Eigen::Matrix<double, 1, -1, 1, 1, -1>&)> cp = shortest_edge_and_midpoint;
 
                     int e, e1, e2, f1, f2;
 
                     if (!collapse_least_cost_edge(
-                        cp, protected_pre_collapse, never_care,
+                        cp, always_try, never_care,
                         V, F, E, EMAP, EF, EI, Q, EQ, C,
                         e, e1, e2, f1, f2))
                     {
