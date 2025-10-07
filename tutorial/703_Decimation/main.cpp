@@ -18,6 +18,37 @@
 #include <igl/unique_rows.h>
 #include <igl/is_edge_manifold.h>
 #include <igl/split_nonmanifold.h>
+#include <igl/edge_collapse_is_valid.h>
+
+bool is_edge_manifold(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F)
+{
+    // Map from edge (min,max) -> incident faces
+    std::map<std::pair<int, int>, std::vector<int>> edge_faces;
+
+    for (int f = 0; f < F.rows(); ++f)
+    {
+        for (int j = 0; j < 3; ++j)
+        {
+            int v1 = F(f, j);
+            int v2 = F(f, (j + 1) % 3); // next vertex
+            if (v1 > v2) std::swap(v1, v2); // undirected edge
+            edge_faces[{v1, v2}].push_back(f);
+        }
+    }
+
+    // Check each edge
+    for (const auto& kv : edge_faces)
+    {
+        const auto& faces = kv.second;
+        if (faces.size() > 2)
+        {
+            // Non-manifold edge (more than 2 incident faces)
+            return false;
+        }
+    }
+
+    return true;
+}
 
 bool is_vertex_manifold(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F)
 {
@@ -86,21 +117,65 @@ bool is_vertex_manifold(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F)
     return true;
 }
 
-// Check if edge has adjacent faces with zero/low weights (structural elements)
-bool hasLowWeightAdjacent(const Eigen::MatrixXi& F, const Eigen::VectorXd& W,
-    const Eigen::MatrixXi& E, const Eigen::MatrixXi& EF, int edge_id)
+
+bool is_valid_collapse(
+    int e,
+    const Eigen::MatrixXi& F,
+    const Eigen::MatrixXi& E,
+    const Eigen::VectorXi& EMAP,
+    const Eigen::MatrixXi& EF,
+    const Eigen::MatrixXi& EI)
 {
-    if (edge_id < 0 || edge_id >= EF.rows()) return false;
+    // Bounds check first
+    if (e < 0 || e >= E.rows()) return false;
+    if (e >= EF.rows()) return false;
 
-    int f1 = EF(edge_id, 0);
-    int f2 = EF(edge_id, 1);
+    int f0 = EF(e, 0);
+    int f1 = EF(e, 1);
 
-    // Protect edges adjacent to low-weight faces (walls/floors)
-    if (f1 >= 0 && f1 < W.rows() && W(f1) < 0.1) return true;  // Adjust threshold as needed
-    if (f2 >= 0 && f2 < W.rows() && W(f2) < 0.1) return true;
+    // Boundary check
+    if (f0 == -1 || f1 == -1) return false;
+    if (f0 >= F.rows() || f1 >= F.rows()) return false;
 
-    return false;
+    // Get vertices
+    int v0 = E(e, 0);
+    int v1 = E(e, 1);
+
+    if (v0 < 0 || v1 < 0) return false;
+
+    // Manually compute neighbors (safer than circulation)
+    std::vector<int> Nsv, Ndv;
+
+    // Find all faces containing v0
+    for (int f = 0; f < F.rows(); f++) {
+        for (int i = 0; i < 3; i++) {
+            if (F(f, i) == v0) {
+                // Add all vertices of this face
+                Nsv.push_back(F(f, 0));
+                Nsv.push_back(F(f, 1));
+                Nsv.push_back(F(f, 2));
+                break;
+            }
+        }
+    }
+
+    // Find all faces containing v1
+    for (int f = 0; f < F.rows(); f++) {
+        for (int i = 0; i < 3; i++) {
+            if (F(f, i) == v1) {
+                // Add all vertices of this face
+                Ndv.push_back(F(f, 0));
+                Ndv.push_back(F(f, 1));
+                Ndv.push_back(F(f, 2));
+                break;
+            }
+        }
+    }
+
+    // Use the second overload
+    return igl::edge_collapse_is_valid(Nsv, Ndv);
 }
+
 
 // Compute face normal
 Eigen::Vector3d faceNormal(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, int f)
@@ -120,6 +195,24 @@ Eigen::Vector3d faceNormal(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, i
     return (norm > 1e-10) ? normal / norm : Eigen::Vector3d(0, 0, 1);
 }
 
+
+// Check if faces are likely floors (horizontal) or walls (vertical)
+bool isFloorOrWall(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, int face_id)
+{
+    if (face_id < 0 || face_id >= F.rows()) return false;
+
+    Eigen::Vector3d normal = faceNormal(V, F, face_id);
+
+    // Floor: normal points mostly up (Y-axis)
+    if (std::abs(normal.y()) > 0.8) return true;
+
+    // Wall: normal is mostly horizontal (low Y component)
+    if (std::abs(normal.y()) < 0.3) return true;
+
+    return false;
+}
+
+
 // Check if edge is structurally important (boundary, sharp, or connects important faces)
 bool isStructurallyImportant(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
     const Eigen::MatrixXi& E, const Eigen::MatrixXi& EF,
@@ -134,8 +227,12 @@ bool isStructurallyImportant(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
     if (f1 < 0 || f2 < 0) return true;
 
     // Only protect EXTREMELY low weight faces (near zero)
-    if (f1 >= 0 && f1 < W.rows() && W(f1) < 0.01) return true;
-    if (f2 >= 0 && f2 < W.rows() && W(f2) < 0.01) return true;
+    if (f1 >= 0 && f1 < W.rows() && W(f1) < 0.01)
+        if (isFloorOrWall(V, F, f1))
+            return true;
+    if (f2 >= 0 && f2 < W.rows() && W(f2) < 0.01)
+        if (isFloorOrWall(V, F, f2))
+            return true;
 
     // Sharp edges (very sharp angles only)
     if (f1 >= 0 && f1 < F.rows() && f2 >= 0 && f2 < F.rows()) {
@@ -158,25 +255,8 @@ bool isStructurallyImportant(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
     }
 
     return false;
-
-
 }
 
-// Check if faces are likely floors (horizontal) or walls (vertical)
-bool isFloorOrWall(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, int face_id)
-{
-    if (face_id < 0 || face_id >= F.rows()) return false;
-
-    Eigen::Vector3d normal = faceNormal(V, F, face_id);
-
-    // Floor: normal points mostly up (Y-axis)
-    if (std::abs(normal.y()) > 0.8) return true;
-
-    // Wall: normal is mostly horizontal (low Y component)
-    if (std::abs(normal.y()) < 0.3) return true;
-
-    return false;
-}
 
 void saveSimplifiedMesh(const std::string& original_path,
     const Eigen::MatrixXd& V,
@@ -220,7 +300,6 @@ void saveSimplifiedMesh(const std::string& original_path,
 }
 
 
-
 int main(int argc, char* argv[])
 {
     using namespace std;
@@ -233,7 +312,7 @@ int main(int argc, char* argv[])
     cout << "  'r'  reset." << endl;
 
     // Default mesh filename if none provided on command line
-    string filename(TUTORIAL_SHARED_PATH "/level_enclosed_v2.obj");
+    string filename(TUTORIAL_SHARED_PATH "/models/apartment_floor/obj/apartment_floor.obj");
     string removeDuplicates = "true";
     if (argc >= 2)
     {
@@ -261,29 +340,31 @@ int main(int argc, char* argv[])
     //// Load mesh from file (triangle mesh)
     read_triangle_mesh(filename, OV, OF);
 
-    if (removeDuplicates == "true")
-    {
-        igl::remove_duplicate_vertices(OV, OF, 1e-7, V_clean, I, J, F_clean);
-        igl::remove_unreferenced(V_clean, F_clean, OV, OF, I);
+    //if (removeDuplicates == "true")
+    //{
+    //    igl::remove_duplicate_vertices(OV, OF, 1e-7, V_clean, I, J, F_clean);
+    //    igl::remove_unreferenced(V_clean, F_clean, OV, OF, I);
 
-        OV = V_clean;
-        OF = F_clean;
+    //    OV = V_clean;
+    //   OF = F_clean;
 
-        Eigen::MatrixXd V_manifold;
-        Eigen::MatrixXi F_manifold;
-        Eigen::VectorXi SVI; // mapping from original to split vertices
+    //    Eigen::MatrixXd V_manifold;
+    //    Eigen::MatrixXi F_manifold;
+    //    Eigen::VectorXi SVI; // mapping from original to split vertices
 
-        igl::split_nonmanifold(OV, OF, V_manifold, F_manifold, SVI);
+    //    igl::split_nonmanifold(OV, OF, V_manifold, F_manifold, SVI);
 
-        bool isEdgeManifold = igl::is_edge_manifold(OF);
-        bool isVertexManifold = is_vertex_manifold(OV, OF);
 
-        printf("Is the mesh edge-manifold? %s\n", isEdgeManifold ? "Yes" : "No");
-        printf("Is the mesh vertex-manifold? %s\n", isVertexManifold ? "Yes" : "No");
 
-        //saveSimplifiedMesh(filename, OV, OF, true);
-    }
+    //    //saveSimplifiedMesh(filename, OV, OF, true);
+    //}
+    // bool isEdgeManifold = is_edge_manifold(OV,OF);
+    //    printf("Is the mesh edge-manifold? %s\n", isEdgeManifold ? "Yes" : "No");
 
+
+    //bool isVertexManifold = is_vertex_manifold(OV, OF);
+
+    //printf("Is the mesh vertex-manifold? %s\n", isVertexManifold ? "Yes" : "No");
 
     //////////////// DEBUG ////////////////
 
@@ -299,7 +380,7 @@ int main(int argc, char* argv[])
     Eigen::VectorXd W(OF.rows());
 
     // Read weights from file
-    std::ifstream fin(std::string(std::getenv("USERPROFILE")) + "\\Desktop\\level_enclosed_v2_weights.txt");
+    std::ifstream fin(std::string(std::getenv("USERPROFILE")) + "\\Desktop\\apartment_floor_weights.txt");
     if (!fin) {
         std::cerr << "Error: could not open weights file.\n";
         return -1; // exit if file can't be opened
@@ -412,21 +493,51 @@ int main(int argc, char* argv[])
                 const int max_iter = std::ceil(0.6 * Q.size());
                 for (int j = 0; j < max_iter; j++)
                 {
+                    int e, e1, e2, f1, f2; // I moved this up here so check_if_collapse_is_valid would have 'e' declarated.
+
                     // Callbacks controlling whether collapse is allowed / post-processing
-                    igl::decimate_pre_collapse_callback always_try; // Always try to collapse edges
+                    //igl::decimate_pre_collapse_callback always_try; // Always try to collapse edges
 
+                    //igl::decimate_pre_collapse_callback check_if_collapse_is_valid
+                    //{
+                    //    is_valid_collapse(e, F, E, EMAP, EF, EI);  
+                    //};
+                    
+                    // Define a callback function that checks whether an edge collapse is valid
+                    igl::decimate_pre_collapse_callback check_if_collapse_is_valid =
+                        [&](const Eigen::MatrixXd& V_in,
+                            const Eigen::MatrixXi& F_in,
+                            const Eigen::MatrixXi& E_in,
+                            const Eigen::VectorXi& EMAP_in,
+                            const Eigen::MatrixXi& EF_in,
+                            const Eigen::MatrixXi& EI_in,
+                            const std::priority_queue<
+                            std::tuple<double, int, int>,
+                            std::vector<std::tuple<double, int, int>>,
+                            std::greater<std::tuple<double, int, int>>
+                            >& Q_in,
+                            const Eigen::VectorXi& EQ_in,
+                            const Eigen::MatrixXd& C_in,
+                            int e_in) -> bool
+                        {
+                            // Delegate the actual geometric validity check to your custom function
+                            // (This likely checks for flipped faces, topology violations, etc.)
+                            return is_valid_collapse(e_in, F_in, E_in, EMAP_in, EF_in, EI_in);
+                        };
 
-                    igl::decimate_post_collapse_callback never_care;  // No special post-collapse handling
+                    // Define a post-collapse callback that does nothing (a placeholder)
+                    igl::decimate_post_collapse_callback never_care;
 
-
-                    igl::decimate_trivial_callbacks(always_try, never_care);
+                    // Assign both callbacks to igl’s "trivial" decimation callback setup
+                    // This means: use our pre-collapse check, but ignore post-collapse events.
+                    igl::decimate_trivial_callbacks(check_if_collapse_is_valid, never_care);
 
                     const std::function<void(int, Eigen::Matrix<double, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, 1, 0, -1, 1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, double&, Eigen::Matrix<double, 1, -1, 1, 1, -1>&)> cp = shortest_edge_and_midpoint;
 
-                    int e, e1, e2, f1, f2;
-
+                    // ...and here so it does that check to decide if it should collapse or not.
+                    // (check line 72 in collapse_least_cost_edge.cpp)
                     if (!collapse_least_cost_edge(
-                        cp, always_try, never_care,
+                        cp, check_if_collapse_is_valid, never_care,
                         V, F, E, EMAP, EF, EI, Q, EQ, C,
                         e, e1, e2, f1, f2))
                     {
@@ -435,6 +546,9 @@ int main(int argc, char* argv[])
 
                     something_collapsed = true;
                     num_collapsed++;
+
+                    // DEBUG
+                    std::cout << "Collapsed: " << num_collapsed << " | Q: " << Q.size() << std::endl;
                 }
 
                 if (something_collapsed)
@@ -483,7 +597,7 @@ int main(int argc, char* argv[])
     viewer.core().background_color.setConstant(1);
 
     // Start animation by default
-    viewer.core().is_animating = true;
+    viewer.core().is_animating = false;
 
     // Assign callbacks for key presses and pre-draw frame updates
     viewer.callback_key_down = key_down;
