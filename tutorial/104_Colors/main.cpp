@@ -121,9 +121,9 @@ Eigen::MatrixXd face_weights_to_vertex_colors(
 
 int main(int argc, char *argv[])
 {
-    std::string model_name = "apartment_floor";
+    std::string model_name = "apartment_floor_simplified";
   // Load a mesh in OBJ format
-  std::string filename(TUTORIAL_SHARED_PATH "/models/apartment_floor/obj/" + model_name + ".obj");
+  std::string filename(TUTORIAL_SHARED_PATH "/models/apartment_floor_decimated/" + model_name + ".obj");
 
   igl::read_triangle_mesh(filename, V, F);
 

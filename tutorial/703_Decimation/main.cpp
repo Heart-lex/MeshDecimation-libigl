@@ -7,175 +7,14 @@
 #include <igl/parallel_for.h>
 #include <igl/read_triangle_mesh.h>
 #include <igl/opengl/glfw/Viewer.h>
+#include <igl/readOBJ.h>
+#include <igl/writeOBJ.h>
 #include <Eigen/Core>
 #include <iostream>
 #include <set>
-#include <igl/remove_unreferenced.h>
-#include <igl/writeOBJ.h>
 #include <filesystem>
 #include <string>
-#include <igl/remove_duplicate_vertices.h>
 #include <igl/unique_rows.h>
-#include <igl/is_edge_manifold.h>
-#include <igl/split_nonmanifold.h>
-#include <igl/edge_collapse_is_valid.h>
-
-bool is_edge_manifold(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F)
-{
-    // Map from edge (min,max) -> incident faces
-    std::map<std::pair<int, int>, std::vector<int>> edge_faces;
-
-    for (int f = 0; f < F.rows(); ++f)
-    {
-        for (int j = 0; j < 3; ++j)
-        {
-            int v1 = F(f, j);
-            int v2 = F(f, (j + 1) % 3); // next vertex
-            if (v1 > v2) std::swap(v1, v2); // undirected edge
-            edge_faces[{v1, v2}].push_back(f);
-        }
-    }
-
-    // Check each edge
-    for (const auto& kv : edge_faces)
-    {
-        const auto& faces = kv.second;
-        if (faces.size() > 2)
-        {
-            // Non-manifold edge (more than 2 incident faces)
-            return false;
-        }
-    }
-
-    return true;
-}
-
-bool is_vertex_manifold(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F)
-{
-    // Map from vertex to incident faces
-    std::vector<std::vector<int>> vertex_faces(V.rows());
-    for (int f = 0; f < F.rows(); ++f)
-    {
-        for (int j = 0; j < 3; ++j)
-        {
-            vertex_faces[F(f, j)].push_back(f);
-        }
-    }
-
-    // Check each vertex
-    for (int v = 0; v < V.rows(); ++v)
-    {
-        const auto& faces = vertex_faces[v];
-        if (faces.empty()) continue; // isolated vertex, ignore
-
-        // Build adjacency graph of faces around vertex v
-        std::map<int, std::set<int>> face_adjacency;
-        for (int i = 0; i < faces.size(); ++i)
-        {
-            int f1 = faces[i];
-            for (int j = i + 1; j < faces.size(); ++j)
-            {
-                int f2 = faces[j];
-                // Count shared edge
-                int shared = 0;
-                for (int a = 0; a < 3; ++a)
-                    for (int b = 0; b < 3; ++b)
-                        if (F(f1, a) == F(f2, b)) shared++;
-                if (shared == 2) // they share an edge
-                {
-                    face_adjacency[f1].insert(f2);
-                    face_adjacency[f2].insert(f1);
-                }
-            }
-        }
-
-        // BFS/DFS to check connectivity
-        std::set<int> visited;
-        std::queue<int> q;
-        q.push(faces[0]);
-        visited.insert(faces[0]);
-        while (!q.empty())
-        {
-            int cf = q.front(); q.pop();
-            for (int nf : face_adjacency[cf])
-            {
-                if (visited.count(nf) == 0)
-                {
-                    visited.insert(nf);
-                    q.push(nf);
-                }
-            }
-        }
-
-        if (visited.size() != faces.size())
-        {
-            // Faces around this vertex are disconnected -> non-manifold
-            return false;
-        }
-    }
-
-    return true;
-}
-
-
-bool is_valid_collapse(
-    int e,
-    const Eigen::MatrixXi& F,
-    const Eigen::MatrixXi& E,
-    const Eigen::VectorXi& EMAP,
-    const Eigen::MatrixXi& EF,
-    const Eigen::MatrixXi& EI)
-{
-    // Bounds check first
-    if (e < 0 || e >= E.rows()) return false;
-    if (e >= EF.rows()) return false;
-
-    int f0 = EF(e, 0);
-    int f1 = EF(e, 1);
-
-    // Boundary check
-    if (f0 == -1 || f1 == -1) return false;
-    if (f0 >= F.rows() || f1 >= F.rows()) return false;
-
-    // Get vertices
-    int v0 = E(e, 0);
-    int v1 = E(e, 1);
-
-    if (v0 < 0 || v1 < 0) return false;
-
-    // Manually compute neighbors (safer than circulation)
-    std::vector<int> Nsv, Ndv;
-
-    // Find all faces containing v0
-    for (int f = 0; f < F.rows(); f++) {
-        for (int i = 0; i < 3; i++) {
-            if (F(f, i) == v0) {
-                // Add all vertices of this face
-                Nsv.push_back(F(f, 0));
-                Nsv.push_back(F(f, 1));
-                Nsv.push_back(F(f, 2));
-                break;
-            }
-        }
-    }
-
-    // Find all faces containing v1
-    for (int f = 0; f < F.rows(); f++) {
-        for (int i = 0; i < 3; i++) {
-            if (F(f, i) == v1) {
-                // Add all vertices of this face
-                Ndv.push_back(F(f, 0));
-                Ndv.push_back(F(f, 1));
-                Ndv.push_back(F(f, 2));
-                break;
-            }
-        }
-    }
-
-    // Use the second overload
-    return igl::edge_collapse_is_valid(Nsv, Ndv);
-}
-
 
 // Compute face normal
 Eigen::Vector3d faceNormal(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, int f)
@@ -260,7 +99,12 @@ bool isStructurallyImportant(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
 
 void saveSimplifiedMesh(const std::string& original_path,
     const Eigen::MatrixXd& V,
-    const Eigen::MatrixXi& F, bool removeDuplicates)
+    const Eigen::MatrixXi& F,
+    const Eigen::MatrixXd& CN,
+    const Eigen::MatrixXi& FN,
+    const Eigen::MatrixXd& TC,
+    const Eigen::MatrixXi& FT
+)
 {
     // Desktop path
     std::string desktop_path = std::string(std::getenv("USERPROFILE")) + "\\Desktop\\";
@@ -283,20 +127,17 @@ void saveSimplifiedMesh(const std::string& original_path,
     std::string out_filename;
 
     // Build new filename
-    if (removeDuplicates)
-    {
-        out_filename = desktop_path + filename + "_clean" + extension;
-    }
-    else
-    {
-        out_filename = desktop_path + filename + "_simplified" + extension;
-    }
+
+    out_filename = desktop_path + filename + "_simplified" + extension;
 
     // Save mesh
-    if (!igl::writeOBJ(out_filename, V, F))
-        std::cerr << "Failed to save simplified mesh." << std::endl;
+    if (!igl::writeOBJ(out_filename, V, F, CN, FN, TC, FT)) {
+        std::cerr << "ERROR: Could not write OBJ: " << out_filename << std::endl;
+    }
     else
+    {
         std::cout << "Simplified mesh saved as " << out_filename << std::endl;
+    }
 }
 
 
@@ -307,74 +148,36 @@ int main(int argc, char* argv[])
     using namespace igl;
 
     // Print usage instructions
-    cout << "Usage: ./703_Decimation_bin [filename.(off|obj|ply)]" << endl;
+    cout << "Usage: ./703_Decimation_bin [filename.obj] [decimation factor (integer, >0)]" << endl;
     cout << "  [space]  toggle animation." << endl;
     cout << "  'r'  reset." << endl;
 
     // Default mesh filename if none provided on command line
     string filename(TUTORIAL_SHARED_PATH "/models/apartment_floor/obj/apartment_floor.obj");
-    string removeDuplicates = "true";
+    unsigned int decimation_factor = 5; // Default: 20% of starting face count
     if (argc >= 2)
     {
         // Override default filename with user input
         filename = argv[1];
-        removeDuplicates = argv[2];
+        decimation_factor = atoi(argv[2]);
+    }
 
+    if (decimation_factor < 2)
+    {
+        std::cerr << "Decimation factor has to be greater than 1!" << std::endl;
+        return -1;
     }
 
     //// Matrices to hold vertex positions and face indices (original and working copies)
-    MatrixXd V, OV; // V = current vertices, OV = original vertices
-    MatrixXi F, OF; // F = current faces, OF = original faces
-
-    // Intermediate matrices for cleaning
-    MatrixXi F_clean; // Cleaned faces after preprocessing
-    MatrixXd V_clean; // Cleaned vertices after preprocessing
-
-    // Intermediate matrices for manifold processing
-    MatrixXd V_manifold; // Manifold vertices after preprocessing
-    MatrixXi F_manifold; // Manifold faces after preprocessing
-
-    VectorXi I, J; // Index mappings
-    VectorXi SVI; // mapping from original to split vertices
+    MatrixXd V, OV, TC, CN; // V = current vertices, OV = original vertices, TC = texture coords, CN = vertex normals
+    MatrixXi F, OF, FT, FN; // F = current faces, OF = original faces, FT = face texture indices, FN = face normal indices
 
     //// Load mesh from file (triangle mesh)
-    read_triangle_mesh(filename, OV, OF);
-
-    //if (removeDuplicates == "true")
-    //{
-    //    igl::remove_duplicate_vertices(OV, OF, 1e-7, V_clean, I, J, F_clean);
-    //    igl::remove_unreferenced(V_clean, F_clean, OV, OF, I);
-
-    //    OV = V_clean;
-    //   OF = F_clean;
-
-    //    Eigen::MatrixXd V_manifold;
-    //    Eigen::MatrixXi F_manifold;
-    //    Eigen::VectorXi SVI; // mapping from original to split vertices
-
-    //    igl::split_nonmanifold(OV, OF, V_manifold, F_manifold, SVI);
-
-
-
-    //    //saveSimplifiedMesh(filename, OV, OF, true);
-    //}
-    // bool isEdgeManifold = is_edge_manifold(OV,OF);
-    //    printf("Is the mesh edge-manifold? %s\n", isEdgeManifold ? "Yes" : "No");
-
-
-    //bool isVertexManifold = is_vertex_manifold(OV, OF);
-
-    //printf("Is the mesh vertex-manifold? %s\n", isVertexManifold ? "Yes" : "No");
-
-    //////////////// DEBUG ////////////////
-
-    //// Print original vertices and faces
-    //std::cout << "Original vertices (OV):\n" << OV << std::endl;
-    //std::cout << "Original faces (OF):\n" << OF << std::endl;
+    if (!igl::readOBJ(filename, OV, TC, CN, OF, FT, FN)) {
+        std::cerr << "ERROR: Could not read OBJ: " << filename << std::endl;
+    }
 
     cout << "\nLoaded mesh " << filename << " with " << OV.rows() << " vertices and " << OF.rows() << " faces\n";
-
-    //////////////// DEBUG ////////////////
 
     // Allocate a vector with as many entries as there are faces
     Eigen::VectorXd W(OF.rows());
@@ -407,6 +210,9 @@ int main(int argc, char* argv[])
     MatrixXd C; // Candidate collapse points per edge (usually midpoint)
     int num_collapsed; // Counter of how many edges have been collapsed
 
+    unsigned int face_target = 0; // Decimation stop condition
+    unsigned int face_counter = -1; // Decimation face counter
+
     // Lambda function to reset mesh and initialize all data structures
     const auto& reset = [&]()
         {
@@ -424,6 +230,8 @@ int main(int argc, char* argv[])
             // Q.clear();
             // Clear priority queue by reinitializing empty queue
             Q = {};
+
+            unsigned int important_edges = 0;
 
             // Initialize EQ helper vector (one entry per edge) to zeros
             EQ = Eigen::VectorXi::Zero(E.rows());
@@ -452,6 +260,9 @@ int main(int argc, char* argv[])
                             else {
                                 C.row(e) = Eigen::RowVectorXd::Zero(3);
                             }
+
+                            ++important_edges;
+
                             return;
                         }
 
@@ -469,6 +280,13 @@ int main(int argc, char* argv[])
                 }
             }
 
+            face_counter = F.rows();
+            face_target = F.rows() / decimation_factor; // Simplify to decimation_factor% of the initial faces (default: 20%)
+
+            std::cout << "Number of important edges: " << important_edges << std::endl;
+
+            std::cout << "Face target: " << face_target << std::endl;
+
             // Reset the collapsed edges count
             num_collapsed = 0;
 
@@ -481,63 +299,35 @@ int main(int argc, char* argv[])
     // Lambda function called before every draw frame in the viewer
     const auto& pre_draw = [&](igl::opengl::glfw::Viewer& viewer)->bool
         {
-            // Only run if animation is toggled on and there are edges to collapse
-            if (viewer.core().is_animating && !Q.empty())
+            // Only run if animation is toggled on, there are edges to collapse
+            // and we have not reached the face threshold yet
+            if (viewer.core().is_animating && !Q.empty() && face_counter > face_target)
             {
                 // Toggle animation flag off after one iteration (to step collapse one batch)
                 //viewer.core().is_animating ^= 1;
 
                 bool something_collapsed = false;
 
-                // Decide how many edges to collapse in this frame: 60% of remaining edges
-                const int max_iter = std::ceil(0.6 * Q.size());
+                // Decide how many edges to collapse in this frame: 100% of remaining edges
+                const int max_iter = std::ceil(1.0 * Q.size());
                 for (int j = 0; j < max_iter; j++)
                 {
-                    int e, e1, e2, f1, f2; // I moved this up here so check_if_collapse_is_valid would have 'e' declarated.
+                    int e, e1, e2, f1, f2;
 
                     // Callbacks controlling whether collapse is allowed / post-processing
-                    //igl::decimate_pre_collapse_callback always_try; // Always try to collapse edges
-
-                    //igl::decimate_pre_collapse_callback check_if_collapse_is_valid
-                    //{
-                    //    is_valid_collapse(e, F, E, EMAP, EF, EI);  
-                    //};
-                    
-                    // Define a callback function that checks whether an edge collapse is valid
-                    igl::decimate_pre_collapse_callback check_if_collapse_is_valid =
-                        [&](const Eigen::MatrixXd& V_in,
-                            const Eigen::MatrixXi& F_in,
-                            const Eigen::MatrixXi& E_in,
-                            const Eigen::VectorXi& EMAP_in,
-                            const Eigen::MatrixXi& EF_in,
-                            const Eigen::MatrixXi& EI_in,
-                            const std::priority_queue<
-                            std::tuple<double, int, int>,
-                            std::vector<std::tuple<double, int, int>>,
-                            std::greater<std::tuple<double, int, int>>
-                            >& Q_in,
-                            const Eigen::VectorXi& EQ_in,
-                            const Eigen::MatrixXd& C_in,
-                            int e_in) -> bool
-                        {
-                            // Delegate the actual geometric validity check to your custom function
-                            // (This likely checks for flipped faces, topology violations, etc.)
-                            return is_valid_collapse(e_in, F_in, E_in, EMAP_in, EF_in, EI_in);
-                        };
+                    igl::decimate_pre_collapse_callback always_try; // Always try to collapse edges
 
                     // Define a post-collapse callback that does nothing (a placeholder)
                     igl::decimate_post_collapse_callback never_care;
 
                     // Assign both callbacks to igl’s "trivial" decimation callback setup
                     // This means: use our pre-collapse check, but ignore post-collapse events.
-                    igl::decimate_trivial_callbacks(check_if_collapse_is_valid, never_care);
+                    igl::decimate_trivial_callbacks(always_try, never_care);
 
                     const std::function<void(int, Eigen::Matrix<double, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, 1, 0, -1, 1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, double&, Eigen::Matrix<double, 1, -1, 1, 1, -1>&)> cp = shortest_edge_and_midpoint;
 
-                    // ...and here so it does that check to decide if it should collapse or not.
-                    // (check line 72 in collapse_least_cost_edge.cpp)
                     if (!collapse_least_cost_edge(
-                        cp, check_if_collapse_is_valid, never_care,
+                        cp, always_try, never_care,
                         V, F, E, EMAP, EF, EI, Q, EQ, C,
                         e, e1, e2, f1, f2))
                     {
@@ -546,9 +336,12 @@ int main(int argc, char* argv[])
 
                     something_collapsed = true;
                     num_collapsed++;
+                    face_counter -= 2;
 
                     // DEBUG
-                    std::cout << "Collapsed: " << num_collapsed << " | Q: " << Q.size() << std::endl;
+                    std::cout << "Edges: " << E.rows() << std::endl;
+                    std::cout << "Collapsed Edges: " << num_collapsed << " | Q: " << Q.size() << std::endl;
+                    std::cout << "Current Faces: " << face_counter << " | Face Decimation Target: " << face_target << std::endl;
                 }
 
                 if (something_collapsed)
@@ -573,9 +366,9 @@ int main(int argc, char* argv[])
                 viewer.core().is_animating ^= 1;
                 break;
             case 'V':
-            case'v':// Press 'V' or 'v' to save the mesh
+            case 'v':// Press 'V' or 'v' to save the mesh
             {
-                saveSimplifiedMesh(filename, V, F, false);
+                saveSimplifiedMesh(filename, V, F, CN, FN, TC, FT);
                 break;
             }
             break;
