@@ -14,7 +14,187 @@
 #include <set>
 #include <filesystem>
 #include <string>
+#include <fstream>
+#include <sstream>
+#include <map>
 #include <igl/unique_rows.h>
+
+// ============================================================================
+// MATERIAL HANDLING STRUCTURES AND FUNCTIONS
+// ============================================================================
+
+// Structure to hold material groups from OBJ
+struct MaterialGroup {
+    std::string materialName;
+    int startFace;
+    int endFace;
+};
+
+// Parse material assignments from original OBJ
+std::vector<MaterialGroup> parseMaterialGroups(const std::string& filename) {
+    std::vector<MaterialGroup> groups;
+    std::ifstream file(filename);
+    std::string line;
+    std::string currentMaterial;
+    int faceCount = 0;
+    int materialStartFace = 0;
+
+    while (std::getline(file, line)) {
+        std::istringstream iss(line);
+        std::string prefix;
+        iss >> prefix;
+
+        if (prefix == "usemtl") {
+            // Save previous material group
+            if (!currentMaterial.empty()) {
+                groups.push_back({ currentMaterial, materialStartFace, faceCount - 1 });
+            }
+            // Start new material group
+            std::string matName;
+            std::getline(iss, matName);
+            // Trim leading whitespace
+            size_t start = matName.find_first_not_of(" \t");
+            currentMaterial = (start == std::string::npos) ? matName : matName.substr(start);
+            materialStartFace = faceCount;
+        }
+        else if (prefix == "f") {
+            faceCount++;
+        }
+    }
+
+    // Add last material group
+    if (!currentMaterial.empty()) {
+        groups.push_back({ currentMaterial, materialStartFace, faceCount - 1 });
+    }
+
+    return groups;
+}
+
+// Extract MTL filename from OBJ
+std::string getMTLFilename(const std::string& objFilename) {
+    std::ifstream file(objFilename);
+    std::string line;
+
+    while (std::getline(file, line)) {
+        std::istringstream iss(line);
+        std::string prefix;
+        iss >> prefix;
+
+        if (prefix == "mtllib") {
+            std::string mtlFile;
+            std::getline(iss, mtlFile);
+            // Trim leading whitespace
+            size_t start = mtlFile.find_first_not_of(" \t");
+            return (start == std::string::npos) ? mtlFile : mtlFile.substr(start);
+        }
+    }
+
+    return "";
+}
+
+// Build per-face material mapping
+std::vector<std::string> buildFaceMaterialMap(
+    const std::vector<MaterialGroup>& groups,
+    int totalFaces) {
+
+    std::vector<std::string> faceMaterials(totalFaces, "default");
+
+    for (const auto& group : groups) {
+        for (int i = group.startFace; i <= group.endFace && i < totalFaces; i++) {
+            faceMaterials[i] = group.materialName;
+        }
+    }
+
+    return faceMaterials;
+}
+
+// Write OBJ with materials and texture coordinates
+void writeOBJWithMaterialsAndUVs(
+    const std::string& filename,
+    const std::string& mtlFilename,
+    const Eigen::MatrixXd& V,
+    const Eigen::MatrixXi& F,
+    const Eigen::MatrixXd& TC,
+    const Eigen::MatrixXi& FT,
+    const Eigen::MatrixXd& CN,
+    const Eigen::MatrixXi& FN,
+    const std::vector<std::string>& faceMaterials) {
+
+    std::ofstream file(filename);
+
+    if (!file.is_open()) {
+        std::cerr << "Failed to open file: " << filename << std::endl;
+        return;
+    }
+
+    // Write MTL reference
+    if (!mtlFilename.empty()) {
+        file << "mtllib " << mtlFilename << "\n\n";
+    }
+
+    // Write vertices
+    for (int i = 0; i < V.rows(); i++) {
+        file << "v " << V(i, 0) << " " << V(i, 1) << " " << V(i, 2) << "\n";
+    }
+    file << "\n";
+
+    // Write texture coordinates
+    if (TC.rows() > 0) {
+        for (int i = 0; i < TC.rows(); i++) {
+            file << "vt " << TC(i, 0) << " " << TC(i, 1);
+            if (TC.cols() > 2) {
+                file << " " << TC(i, 2);
+            }
+            file << "\n";
+        }
+        file << "\n";
+    }
+
+    // Write normals
+    if (CN.rows() > 0) {
+        for (int i = 0; i < CN.rows(); i++) {
+            file << "vn " << CN(i, 0) << " " << CN(i, 1) << " " << CN(i, 2) << "\n";
+        }
+        file << "\n";
+    }
+
+    // Write faces grouped by material
+    std::string currentMaterial;
+    bool hasTexCoords = (FT.rows() == F.rows() && TC.rows() > 0);
+    bool hasNormals = (FN.rows() == F.rows() && CN.rows() > 0);
+
+    for (int i = 0; i < F.rows(); i++) {
+        // Change material if needed
+        if (i < faceMaterials.size() && faceMaterials[i] != currentMaterial) {
+            currentMaterial = faceMaterials[i];
+            file << "usemtl " << currentMaterial << "\n";
+        }
+
+        // Write face with texture coordinates and normals
+        file << "f";
+        for (int j = 0; j < F.cols(); j++) {
+            file << " " << (F(i, j) + 1);
+
+            if (hasTexCoords || hasNormals) {
+                file << "/";
+                if (hasTexCoords) {
+                    file << (FT(i, j) + 1);
+                }
+                if (hasNormals) {
+                    file << "/" << (FN(i, j) + 1);
+                }
+            }
+        }
+        file << "\n";
+    }
+
+    file.close();
+    std::cout << "Successfully wrote OBJ with materials to: " << filename << std::endl;
+}
+
+// ============================================================================
+// ORIGINAL FUNCTIONS (unchanged)
+// ============================================================================
 
 // Compute face normal
 Eigen::Vector3d faceNormal(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, int f)
@@ -34,7 +214,6 @@ Eigen::Vector3d faceNormal(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, i
     return (norm > 1e-10) ? normal / norm : Eigen::Vector3d(0, 0, 1);
 }
 
-
 // Check if faces are likely floors (horizontal) or walls (vertical)
 bool isFloorOrWall(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, int face_id)
 {
@@ -50,7 +229,6 @@ bool isFloorOrWall(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, int face_
 
     return false;
 }
-
 
 // Check if edge is structurally important (boundary, sharp, or connects important faces)
 bool isStructurallyImportant(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
@@ -96,15 +274,16 @@ bool isStructurallyImportant(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
     return false;
 }
 
-
+// MODIFIED: Save function now uses material-aware writer
 void saveSimplifiedMesh(const std::string& original_path,
     const Eigen::MatrixXd& V,
     const Eigen::MatrixXi& F,
     const Eigen::MatrixXd& CN,
     const Eigen::MatrixXi& FN,
     const Eigen::MatrixXd& TC,
-    const Eigen::MatrixXi& FT
-)
+    const Eigen::MatrixXi& FT,
+    const std::vector<std::string>& faceMaterials,
+    const std::string& mtlFilename)
 {
     // Desktop path
     std::string desktop_path = std::string(std::getenv("USERPROFILE")) + "\\Desktop\\";
@@ -124,22 +303,35 @@ void saveSimplifiedMesh(const std::string& original_path,
         ? ".obj"
         : filename_with_ext.substr(last_dot);
 
-    std::string out_filename;
+    std::string out_filename = desktop_path + filename + "_simplified" + extension;
 
-    // Build new filename
+    // Copy MTL file if it exists
+    if (!mtlFilename.empty()) {
+        std::filesystem::path inputPath(original_path);
+        std::filesystem::path mtlInputPath = inputPath.parent_path() / mtlFilename;
+        std::filesystem::path mtlOutputPath = desktop_path + mtlFilename;
 
-    out_filename = desktop_path + filename + "_simplified" + extension;
-
-    // Save mesh
-    if (!igl::writeOBJ(out_filename, V, F, CN, FN, TC, FT)) {
-        std::cerr << "ERROR: Could not write OBJ: " << out_filename << std::endl;
+        try {
+            if (std::filesystem::exists(mtlInputPath)) {
+                std::filesystem::copy_file(mtlInputPath, mtlOutputPath,
+                    std::filesystem::copy_options::overwrite_existing);
+                std::cout << "Copied MTL file: " << mtlFilename << std::endl;
+            }
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Warning: Could not copy MTL file: " << e.what() << std::endl;
+        }
     }
-    else
-    {
-        std::cout << "Simplified mesh saved as " << out_filename << std::endl;
-    }
+
+    // Save mesh with materials
+    writeOBJWithMaterialsAndUVs(out_filename, mtlFilename, V, F, TC, FT, CN, FN, faceMaterials);
+
+    std::cout << "Simplified mesh saved as " << out_filename << std::endl;
 }
 
+// ============================================================================
+// MAIN FUNCTION
+// ============================================================================
 
 int main(int argc, char* argv[])
 {
@@ -179,6 +371,25 @@ int main(int argc, char* argv[])
 
     cout << "\nLoaded mesh " << filename << " with " << OV.rows() << " vertices and " << OF.rows() << " faces\n";
 
+    // ========================================================================
+    // MATERIAL PARSING - NEW CODE
+    // ========================================================================
+
+    // Parse material information from the original OBJ file
+    std::vector<MaterialGroup> materialGroups = parseMaterialGroups(filename);
+    std::vector<std::string> originalFaceMaterials = buildFaceMaterialMap(materialGroups, OF.rows());
+    std::string mtlFilename = getMTLFilename(filename);
+
+    std::cout << "Found " << materialGroups.size() << " material groups" << std::endl;
+    if (!mtlFilename.empty()) {
+        std::cout << "MTL file: " << mtlFilename << std::endl;
+    }
+
+    // Track current face materials (will be updated during decimation)
+    std::vector<std::string> currentFaceMaterials = originalFaceMaterials;
+
+    // ========================================================================
+
     // Allocate a vector with as many entries as there are faces
     Eigen::VectorXd W(OF.rows());
 
@@ -195,8 +406,7 @@ int main(int argc, char* argv[])
     }
     fin.close();
 
-    cout << W.rows() << endl;
-    cout << OF.rows() << endl;
+    std::cout << "Successfully read weights file." << std::endl;
 
     // Create an OpenGL viewer window
     igl::opengl::glfw::Viewer viewer;
@@ -219,6 +429,9 @@ int main(int argc, char* argv[])
             // Reset faces and vertices to original mesh
             F = OF;
             V = OV;
+
+            // Reset material tracking
+            currentFaceMaterials = originalFaceMaterials;
 
             // Compute edge data structures for the mesh
             edge_flaps(F, E, EMAP, EF, EI);
@@ -317,17 +530,48 @@ int main(int argc, char* argv[])
                     // Callbacks controlling whether collapse is allowed / post-processing
                     igl::decimate_pre_collapse_callback always_try; // Always try to collapse edges
 
-                    // Define a post-collapse callback that does nothing (a placeholder)
-                    igl::decimate_post_collapse_callback never_care;
+                    // ================================================================
+                    // MATERIAL TRACKING - NEW CODE
+                    // Define a post-collapse callback to update material tracking
+                    // ================================================================
+                    igl::decimate_post_collapse_callback update_materials =
+                        [&](const Eigen::MatrixXd& V,
+                            const Eigen::MatrixXi& F,
+                            const Eigen::MatrixXi& E,
+                            const Eigen::VectorXi& EMAP,
+                            const Eigen::MatrixXi& EF,
+                            const Eigen::MatrixXi& EI,
+                            const igl::min_heap<std::tuple<double, int, int>>& Q,
+                            const Eigen::VectorXi& EQ,
+                            const Eigen::MatrixXd& C,
+                            const int e,
+                            const int e1,
+                            const int e2,
+                            const int f1,
+                            const int f2,
+                            const bool collapsed) -> void
+                        {
+                            if (!collapsed) return;
 
-                    // Assign both callbacks to igl’s "trivial" decimation callback setup
-                    // This means: use our pre-collapse check, but ignore post-collapse events.
-                    igl::decimate_trivial_callbacks(always_try, never_care);
+                            // When faces f1 and f2 are removed, we need to update our material tracking
+                            // The faces after f1 and f2 shift down by 2
+                            if (f1 >= 0 && f2 >= 0 && f1 < currentFaceMaterials.size() && f2 < currentFaceMaterials.size()) {
+                                int minF = std::min(f1, f2);
+                                int maxF = std::max(f1, f2);
+
+                                // Remove the two collapsed faces
+                                currentFaceMaterials.erase(currentFaceMaterials.begin() + maxF);
+                                currentFaceMaterials.erase(currentFaceMaterials.begin() + minF);
+                            }
+                        };
+
+                    // Assign both callbacks
+                    igl::decimate_trivial_callbacks(always_try, update_materials);
 
                     const std::function<void(int, Eigen::Matrix<double, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, 1, 0, -1, 1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, Eigen::Matrix<int, -1, -1, 0, -1, -1> const&, double&, Eigen::Matrix<double, 1, -1, 1, 1, -1>&)> cp = shortest_edge_and_midpoint;
 
                     if (!collapse_least_cost_edge(
-                        cp, always_try, never_care,
+                        cp, always_try, update_materials,
                         V, F, E, EMAP, EF, EI, Q, EQ, C,
                         e, e1, e2, f1, f2))
                     {
@@ -368,7 +612,8 @@ int main(int argc, char* argv[])
             case 'V':
             case 'v':// Press 'V' or 'v' to save the mesh
             {
-                saveSimplifiedMesh(filename, V, F, CN, FN, TC, FT);
+                // MODIFIED: Pass material information to save function
+                saveSimplifiedMesh(filename, V, F, CN, FN, TC, FT, currentFaceMaterials, mtlFilename);
                 break;
             }
             break;
