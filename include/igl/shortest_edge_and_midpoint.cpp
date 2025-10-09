@@ -7,6 +7,7 @@
 // obtain one at http://mozilla.org/MPL/2.0/.
 #include "shortest_edge_and_midpoint.h"
 
+// Global to influence cost 
 static Eigen::VectorXd g_weights;
 
 namespace igl
@@ -37,8 +38,6 @@ IGL_INLINE void igl::shortest_edge_and_midpoint(
 	// and return the midpoint in p.
 	// The cost is defined as the length of the edge multiplied by a factor
 	// that prioritizes higher points for collapse.
-
-	// ---- Added: use global g_weights to influence cost ----
 
 	// Initialize average weight accumulator
 	double avg_weight = 0.0;
