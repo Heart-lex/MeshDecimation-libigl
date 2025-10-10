@@ -20,7 +20,7 @@
 #include <igl/unique_rows.h>
 
 // ============================================================================
-// MATERIAL HANDLING STRUCTURES AND FUNCTIONS
+//                              MATERIAL HANDLING
 // ============================================================================
 
 // Structure to hold material groups from OBJ
@@ -29,6 +29,7 @@ struct MaterialGroup {
     int startFace;
     int endFace;
 };
+
 
 // Parse material assignments from original OBJ
 std::vector<MaterialGroup> parseMaterialGroups(const std::string& filename) {
@@ -70,6 +71,7 @@ std::vector<MaterialGroup> parseMaterialGroups(const std::string& filename) {
     return groups;
 }
 
+
 // Extract MTL filename from OBJ
 std::string getMTLFilename(const std::string& objFilename) {
     std::ifstream file(objFilename);
@@ -92,6 +94,7 @@ std::string getMTLFilename(const std::string& objFilename) {
     return "";
 }
 
+
 // Build per-face material mapping
 std::vector<std::string> buildFaceMaterialMap(
     const std::vector<MaterialGroup>& groups,
@@ -107,6 +110,7 @@ std::vector<std::string> buildFaceMaterialMap(
 
     return faceMaterials;
 }
+
 
 // Write OBJ with materials and texture coordinates
 void writeOBJWithMaterialsAndUVs(
@@ -192,8 +196,9 @@ void writeOBJWithMaterialsAndUVs(
     std::cout << "Successfully wrote OBJ with materials to: " << filename << std::endl;
 }
 
+
 // ============================================================================
-// ORIGINAL FUNCTIONS (unchanged)
+//                              HELPER FUNCTIONS
 // ============================================================================
 
 // Compute face normal
@@ -274,7 +279,7 @@ bool isStructurallyImportant(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F,
     return false;
 }
 
-// MODIFIED: Save function now uses material-aware writer
+// Material-aware OBJ writer
 void saveSimplifiedMesh(const std::string& original_path,
     const Eigen::MatrixXd& V,
     const Eigen::MatrixXi& F,
@@ -330,7 +335,7 @@ void saveSimplifiedMesh(const std::string& original_path,
 }
 
 // ============================================================================
-// MAIN FUNCTION
+//                                  MAIN
 // ============================================================================
 
 int main(int argc, char* argv[])
@@ -340,23 +345,29 @@ int main(int argc, char* argv[])
     using namespace igl;
 
     // Print usage instructions
-    cout << "Usage: ./703_Decimation_bin [filename.obj] [decimation factor (integer, >0)]" << endl;
+    cout << "Usage: ./703_Decimation_bin [filename.obj (MUST BE TRIANGULATED AND MANIFOLD)] [weights_filename.txt] [decimation factor (integer, >0)]" << endl;
     cout << "  [space]  toggle animation." << endl;
     cout << "  'r'  reset." << endl;
+    cout << "  'v'  save mesh (at current decimation level)." << endl << endl;
 
     // Default mesh filename if none provided on command line
     string filename(TUTORIAL_SHARED_PATH "/models/apartment_floor/obj/apartment_floor.obj");
+    string weights_filename = std::string(std::getenv("USERPROFILE")) + "\\Desktop\\apartment_floor_weights.txt";
     unsigned int decimation_factor = 5; // Default: 20% of starting face count
     if (argc >= 2)
     {
         // Override default filename with user input
         filename = argv[1];
-        decimation_factor = atoi(argv[2]);
+        weights_filename = argv[2];
+        if (argc == 3)
+        {
+            decimation_factor = atoi(argv[3]);
+        }
     }
 
     if (decimation_factor < 2)
     {
-        std::cerr << "Decimation factor has to be greater than 1!" << std::endl;
+        std::cerr << "Decimation factor has to be greater than 1." << std::endl;
         return -1;
     }
 
@@ -394,7 +405,7 @@ int main(int argc, char* argv[])
     Eigen::VectorXd W(OF.rows());
 
     // Read weights from file
-    std::ifstream fin(std::string(std::getenv("USERPROFILE")) + "\\Desktop\\apartment_floor_weights.txt");
+    std::ifstream fin(weights_filename);
     if (!fin) {
         std::cerr << "Error: could not open weights file.\n";
         return -1; // exit if file can't be opened
@@ -406,7 +417,7 @@ int main(int argc, char* argv[])
     }
     fin.close();
 
-    std::cout << "Successfully read weights file." << std::endl;
+    std::cout << "Successfully read weights file." << std::endl << std::endl;
 
     // Create an OpenGL viewer window
     igl::opengl::glfw::Viewer viewer;
@@ -417,7 +428,7 @@ int main(int argc, char* argv[])
     igl::min_heap< std::tuple<double, int, int> > Q; // Priority queue for edges (cost, edge id, unused)
     Eigen::VectorXi EQ; // Edge queue index helper
 
-    MatrixXd C; // Candidate collapse points per edge (usually midpoint)
+    MatrixXd C; // Candidate collapse points per edge
     int num_collapsed; // Counter of how many edges have been collapsed
 
     unsigned int face_target = 0; // Decimation stop condition
@@ -446,7 +457,7 @@ int main(int argc, char* argv[])
 
             unsigned int important_edges = 0;
 
-            // Initialize EQ helper vector (one entry per edge) to zeros
+            // Initialize EQ helper vector (one entry per edge) to zeroes
             EQ = Eigen::VectorXi::Zero(E.rows());
             {
                 // Temporary vector to hold edge costs
@@ -531,7 +542,7 @@ int main(int argc, char* argv[])
                     igl::decimate_pre_collapse_callback always_try; // Always try to collapse edges
 
                     // ================================================================
-                    // MATERIAL TRACKING - NEW CODE
+                    //                         MATERIAL TRACKING
                     // Define a post-collapse callback to update material tracking
                     // ================================================================
                     igl::decimate_post_collapse_callback update_materials =
@@ -553,7 +564,7 @@ int main(int argc, char* argv[])
                         {
                             if (!collapsed) return;
 
-                            // When faces f1 and f2 are removed, we need to update our material tracking
+                            // When faces f1 and f2 are removed, the material tracking needs to be updated
                             // The faces after f1 and f2 shift down by 2
                             if (f1 >= 0 && f2 >= 0 && f1 < currentFaceMaterials.size() && f2 < currentFaceMaterials.size()) {
                                 int minF = std::min(f1, f2);
