@@ -6,7 +6,7 @@
 #include <fstream>
 #include <Eigen/Core>
 
-#define TUTORIAL_SHARED_PATH "C:/Users/Christy-PC/source/repos/MeshDecimation-libigl/build/_deps/libigl_tutorial_data-src"
+#define TUTORIAL_SHARED_PATH "C:/Users/<CHANGE_PATH_TO_USER_PROFILE>/MeshDecimation-libigl/build/_deps/libigl_tutorial_data-src"
 
 Eigen::MatrixXd V;
 Eigen::MatrixXi F;
