@@ -103,7 +103,7 @@ namespace igl {
 | `EF` | `#E × 2` | The two faces adjacent to each edge (`-1` if boundary) |
 | `EI` | `#E × 2` | Which corner of each adjacent face the edge is opposite to |
 
-The priority queue is an `igl::min_heap<tuple<double, int, int>>` — each entry stores `(cost, edge_id, timestamp)`. The timestamp is used to invalidate stale queue entries after a collapse re-prices affected edges.
+The priority queue is an `igl::min_heap<tuple<double, int, int>>` — each entry stores `(cost, edge_id, timestamp)`. The timestamp is used to invalidate stale queue entries after a collapse recalculates affected edges.
 
 ---
 
@@ -130,7 +130,7 @@ while face_counter > face_target and Q not empty:
     call collapse_least_cost_edge(e, ...)
         → removes the two triangles sharing e
         → moves the lower-indexed vertex to the midpoint
-        → re-prices all edges of the surviving one-ring
+        → recalculates all edges of the surviving one-ring
         → calls update_materials callback
     face_counter -= 2
 ```
@@ -226,7 +226,7 @@ cmake --build . --config Release
 ```
 
 The binary lands in `build/bin/`.  
-All dependencies (libigl, Eigen, GLFW, ImGui, OpenGL) are fetched automatically by CMake. No GPU required.
+All dependencies (libigl, Eigen, GLFW, ImGui, OpenGL) are fetched automatically by CMake. 
 
 ---
 
@@ -275,17 +275,20 @@ This repository is **CPU-only**. The companion OptiX repository requires a CUDA-
 
 ---
 
-## Citation
+## Related Work
 
-```bibtex
-@thesis{chrysafi_manetas_2025,
-  author  = {Chrysafi, C. and Manetas, A. A.},
-  title   = {Mesh Decimation / Simplification via Weighted Importance Mapping},
-  school  = {Department of Informatics, Athens University of Economics and Business},
-  year    = {2025},
-  address = {Athens, Greece}
-}
-```
+- **Xanthopoulos (2021)** — *[Evaluation of Illumination-Based Mesh Simplification](http://graphics.cs.aueb.gr/graphics/docs/Light_driven_mesh_simplification.pdf)* — direct predecessor using lighting-driven importance via OptiX + libigl
+- **Liu et al.** — *[Seamless: Seam erasure and seam-aware decoupling of shape from mesh resolution](https://www.cs.toronto.edu/~jacobson/images/seamless-seam-erasure-and-seam-aware-decoupling-of-shape-from-mesh-resolution-siggraph-asia-2017-compressed-liu-et-al.pdf)* — seam-aware decimation extending QSlim
+- **Lindstrom & Turk (2000)** — *[Image-Driven Simplification](https://faculty.cc.gatech.edu/~turk/my_papers/image_simp_tog2000.pdf)* — multi-view image metric for visibility-aware simplification
+- **Garland & Heckbert (1997)** — *[Surface Simplification Using Quadric Error Metrics](https://www.cs.cmu.edu/~garland/Papers/quadrics.pdf)* — the foundational QSlim edge-collapse algorithm
+
+---
+
+## Authors
+
+**C. Chrysafi** and **A. A. Manetas**  
+Athens University of Economics and Business — Department of Informatics  
+Athens, 2025
 
 ---
 
