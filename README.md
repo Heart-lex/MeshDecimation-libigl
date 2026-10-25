@@ -6,7 +6,7 @@
 >
 > **Companion repository (visibility analysis — NVIDIA OptiX):** https://github.com/Heart-lex/MeshDecimation-OptiX
 >
-> **Full thesis:** [`doc/Mesh Decimation via Weighted Importance Mapping.pdf`](doc/Mesh%20Decimation%20via%20Weighted%20Importance%20Mapping.pdf)
+> **Full thesis:** [`doc/Mesh Decimation via Weighted Importance Mapping.pdf`](docs/Mesh%20Decimation%20via%20Weighted%20Importance%20Mapping.pdf)
 
 ---
 
