@@ -1,110 +1,217 @@
-# Mesh Decimation via Weighted Importance Mapping — libigl
+# MeshDecimation-libigl
 
 **Undergraduate Thesis · Athens University of Economics and Business, Department of Informatics · 2025**
 
 > **Authors:** C. Chrysafi · A. A. Manetas
 >
-> **Companion repository (NVIDIA OptiX — visibility analysis):** https://github.com/Heart-lex/MeshDecimation-OptiX
+> **Companion repository (visibility analysis — NVIDIA OptiX):** https://github.com/Heart-lex/MeshDecimation-OptiX
+>
+> **Full thesis:** [`doc/Mesh Decimation via Weighted Importance Mapping.pdf`](doc/Mesh%20Decimation%20via%20Weighted%20Importance%20Mapping.pdf)
 
 ---
 
-## Overview
+## What this repository does
 
-This repository contains the **libigl-based mesh simplification** component of a two-part, visibility-driven mesh decimation pipeline. The pipeline reduces the polygon count of 3D scenes while selectively preserving perceptually important geometry — surfaces that are frequently seen by a virtual agent or camera.
+This is the **mesh simplification** half of a two-stage offline decimation pipeline. It takes:
 
-Traditional mesh decimation treats every triangle as equally important. This produces efficient meshes but can destroy visually critical detail. Our approach addresses this by using **ray-traced visibility data** (computed in the companion OptiX repository) to assign per-face importance weights, which are then embedded into a modified least-cost edge-collapse algorithm. Rarely-seen geometry is decimated aggressively; frequently-viewed surfaces stay intact.
+- an OBJ mesh (any scene, any size)
+- a plain-text per-triangle weight file produced by the companion OptiX repository
 
-**Key result:** up to **85–90% polygon reduction** with near-imperceptible visual differences from the observer's point of view, verified with NVIDIA FLIP image comparison.
+and simplifies the mesh using a **modified least-cost edge-collapse algorithm** that is biased by importance — triangles the virtual agent saw a lot are expensive to collapse; triangles it never saw are cheap.
+
+The companion repository handles all the ray tracing and weight generation. This repository handles nothing but simplification.
 
 ---
 
-## Pipeline
+## The weight file format
+
+The weights file is a plain `.txt` file with one floating-point value per line, one line per triangle, in the same face order as the OBJ:
 
 ```
-                    glTF              weights.txt             OBJ
- ┌──────────────┐ ───────► ┌─────────────────┐ ──────────► ┌──────────────┐ ──────► ┌──────────────┐
- │ UE5 / Blender│          │  NVIDIA OptiX   │             │    libigl    │         │ UE5 / Blender│
- │ (scene setup)│          │ (ray-cast visi- │             │(weighted     │         │  (result)    │
- └──────────────┘          │  bility analysis│             │ simplification         └──────────────┘
-                           └─────────────────┘             └──────────────┘
-                              ↑ companion repo                  ↑ this repo
+0.0312
+0.8741
+0.2200
+0.0001
+...
 ```
 
-The pipeline is **offline** — it pre-processes exported scenes and produces optimized meshes that can be reimported into any compatible tool.
+Values are normalised to `[0, 1]` by the OptiX stage before export. `1.0` is the most-viewed triangle; `0.0` is never seen. The number of lines must exactly match the face count of the OBJ — the code reads them into an `Eigen::VectorXd W` indexed directly by face id.
 
 ---
 
-## How It Works
+## How the cost function works
 
-### Stage 1 — Visibility Analysis (OptiX, companion repo)
+The core change from stock libigl is in `include/igl/shortest_edge_and_midpoint.cpp`. The original function computed cost purely as edge length:
 
-A virtual agent walks through the scene. At each step, rays are cast in all directions and every triangle intersection is recorded. Each hit accumulates a **perceptual weight** combining:
+```cpp
+// Original libigl:
+cost = (V.row(E(e,0)) - V.row(E(e,1))).norm();
+```
 
-- **Distance weighting** — a logarithmic inverse-square falloff that emphasises nearby geometry:
+This repository replaces that with importance-biased cost:
 
-$$w_d = \frac{1}{\log_{10}(1 + d^2)}$$
+```cpp
+// Modified:
+double avg_weight = 0.0;
+int count = 0;
+int f0 = EF(e, 0);
+int f1 = EF(e, 1);
+if (f0 != -1) { avg_weight += g_weights(f0); count++; }
+if (f1 != -1) { avg_weight += g_weights(f1); count++; }
+if (count > 0) avg_weight /= count;
 
-- **Foveated weighting** — models the drop in human visual acuity away from the fovea (centre of gaze):
+cost = 1.0 + avg_weight;
+p = 0.5 * (V.row(E(e, 0)) + V.row(E(e, 1)));
+```
 
-| Region | Cone angle | Weight |
-|--------|-----------|--------|
-| Foveal | ~5° | 1.0 |
-| Parafoveal | ~20° | 0.51 – 0.99 |
-| Peripheral | ~45° | 0.1 – 0.5 |
+The cost of collapsing an edge is the **average importance of its two adjacent faces**, offset by 1. The collapse point is always the midpoint.
 
-The final per-hit importance is:
+This means:
 
-$$w_i = \log(1 + w_d \cdot w_f)$$
+| Face importance (avg) | Collapse cost | Priority |
+|---|---|---|
+| 0.0 — never seen | 1.0 | Collapses first |
+| 0.5 — moderately seen | 1.5 | Collapses in the middle |
+| 1.0 — most-viewed | 2.0 | Collapses last |
 
-After all rays are traced, per-triangle weights are normalised to `[0, 1]` and exported as a plain-text file (one value per line, one line per triangle).
+The ratio between the cheapest and most expensive collapsible edge is 1:2. This is intentional — the offset keeps the cost range narrow enough that the heap stays well-ordered without making critical faces uncollapsable.
 
-### Stage 2 — Weighted Simplification (this repo)
+The weights are injected via a small addition to the same file:
 
-The libigl simplification extends the standard least-cost edge-collapse algorithm:
+```cpp
+static Eigen::VectorXd g_weights;
 
-1. Compute all edges and adjacency (`igl::edge_flaps`).
-2. Load the per-triangle weight table produced by the OptiX stage.
-3. For each edge, compute a geometric cost and candidate collapse point (`shortest_edge_and_midpoint`).
-4. **Multiply the cost by the local importance weight** — edges adjacent to high-importance faces become more expensive to collapse, preserving visible detail.
-5. Push each edge into a min-heap priority queue ordered by cost.
-6. Iteratively collapse the cheapest edge (`collapse_least_cost_edge`), respecting boundary, material, and structural constraints.
+namespace igl {
+    void set_weights(Eigen::VectorXd& W) {
+        g_weights = W;
+    }
+}
+```
 
-A custom `isStructurallyImportant()` guard additionally protects:
-- Boundary and sharp edges
-- Long structural edges
-- Horizontal and vertical planes (floors and walls)
-
-Material continuity is maintained after each collapse via an `update_materials` callback, and the final mesh is serialised with `writeOBJWithMaterialsAndUVs()` — preserving geometry, UV coordinates, normals, and MTL references.
-
----
-
-## Results
-
-Tests were run on a custom apartment scene containing **112,591 triangles**, built in Blender and Unreal Engine 5.
-
-| Reduction | Triangles remaining | Visual difference (NVIDIA FLIP, agent POV) |
-|-----------|--------------------|--------------------------------------------|
-| 0% (original) | 112,591 | — reference |
-| 50% | 56,261 | Negligible; only minor silhouette edges affected |
-| 85% | 18,765 | Silhouette-only changes; occluded geometry heavily reduced |
-| ~90% | ~11,000 | Geometry outside agent path removed; agent-visible surfaces intact |
-
-NVIDIA FLIP image comparisons confirmed that differences, when viewed from positions along the agent's traversal path, are confined to mesh silhouettes and are imperceptible to the naked eye. Objects entirely occluded from the agent's perspective (e.g., the lower body of a camel behind a wall, toys in an unvisited room) were correctly identified and aggressively decimated.
+`set_weights(W)` is called once during initialisation. The function is declared in `shortest_edge_and_midpoint.h` and called from `main.cpp` before the priority queue is built.
 
 ---
 
-## Requirements
+## Data structures
 
-| Dependency | Version | Notes |
-|-----------|---------|-------|
-| CMake | ≥ 3.16 | |
-| C++ compiler | C++17 | MSVC, GCC ≥ 9, or Clang ≥ 9 |
-| libigl | 2.5.0 | Header-only; fetched automatically by CMake |
-| Eigen3 | | Fetched automatically |
-| OpenGL + GLFW + ImGui | | For the interactive viewer; fetched automatically |
+`igl::edge_flaps` computes four structures over the mesh that the collapse loop uses:
 
-> This repository runs **entirely on CPU**. No GPU is needed.
-> The NVIDIA OptiX companion repository additionally requires a **CUDA-capable RTX GPU** and the OptiX 9.0 SDK.
+| Variable | Shape | Meaning |
+|---|---|---|
+| `E` | `#E × 2` | Each row is a pair of vertex indices forming one undirected edge |
+| `EMAP` | `#F×3` | Maps each directed half-edge (face corner) to its index in `E` |
+| `EF` | `#E × 2` | The two faces adjacent to each edge (`-1` if boundary) |
+| `EI` | `#E × 2` | Which corner of each adjacent face the edge is opposite to |
+
+The priority queue is an `igl::min_heap<tuple<double, int, int>>` — each entry stores `(cost, edge_id, timestamp)`. The timestamp is used to invalidate stale queue entries after a collapse re-prices affected edges.
+
+---
+
+## The collapse loop
+
+Initialisation (inside the `reset` lambda):
+
+```
+1. F = OF; V = OV;               // reset to original mesh
+2. edge_flaps(F, E, EMAP, EF, EI);
+3. set_weights(W);                 // inject per-face importance weights
+4. for each edge e:
+     if isStructurallyImportant(e): cost = ∞
+     else: shortest_edge_and_midpoint → cost = 1.0 + avg_weight(e)
+     push (cost, e) into Q
+5. face_target = F.rows() / decimation_factor
+```
+
+Per-frame animation step (inside `pre_draw`):
+
+```
+while face_counter > face_target and Q not empty:
+    pop cheapest (cost, e) from Q
+    call collapse_least_cost_edge(e, ...)
+        → removes the two triangles sharing e
+        → moves the lower-indexed vertex to the midpoint
+        → re-prices all edges of the surviving one-ring
+        → calls update_materials callback
+    face_counter -= 2
+```
+
+Each edge collapse removes exactly two triangles. The mesh is re-displayed after each batch via `viewer.data().set_mesh(V, F)`.
+
+![Edge collapse diagram](doc/images/edge_collapse_diagram.jpeg)
+
+---
+
+## Structural guard
+
+Before computing the weighted cost, each edge is tested by `isStructurallyImportant`. Edges that pass are assigned infinite cost and are never collapsed, regardless of their face weights:
+
+| Condition | Threshold | Reason |
+|---|---|---|
+| Boundary edge | `EF(e,0) == -1` or `EF(e,1) == -1` | Collapsing would open a hole |
+| Sharp crease | face normal dot product `< 0.5` (angle > 60°) | Hard surface feature |
+| Long span | edge length `> 5.0` world units | Structural skeleton of large geometry |
+| Invisible floor/wall | face weight `< 0.01` AND normal Y > 0.8 (floor) or Y < 0.3 (wall) | Prevent large invisible planes from collapsing into degenerate geometry |
+
+The floor/wall check is applied only to faces with near-zero weight — highly visible floors are allowed to simplify normally.
+
+---
+
+## Material tracking
+
+Standard libigl decimation discards material assignments. This implementation adds a `std::vector<std::string> currentFaceMaterials` that tracks which `usemtl` group each surviving face belongs to.
+
+Material groups are parsed from the OBJ at load time:
+
+```cpp
+std::vector<MaterialGroup> parseMaterialGroups(filename);
+std::vector<std::string> originalFaceMaterials = buildFaceMaterialMap(groups, OF.rows());
+```
+
+After each collapse, the `update_materials` post-collapse callback removes the two deleted faces from the vector:
+
+```cpp
+int minF = std::min(f1, f2);
+int maxF = std::max(f1, f2);
+currentFaceMaterials.erase(currentFaceMaterials.begin() + maxF);
+currentFaceMaterials.erase(currentFaceMaterials.begin() + minF);
+```
+
+The max-index face is erased first to avoid index shifting affecting the min-index erase.
+
+---
+
+## Mesh with importance weights visible (libigl viewer)
+
+The heatmap below is what the scene looks like inside the libigl viewer after loading — faces are coloured by their importance weight before any simplification begins. Warm (yellow-green) faces are high-importance; cool (blue) faces are low-importance and will collapse first.
+
+![Importance heatmap — libigl viewer](doc/images/importance_heatmap_libigl.jpeg)
+
+---
+
+## Mesh quality at different reduction levels
+
+The three views below show the same apartment scene at 0%, 50%, and 85% triangle reduction. The wireframe reveals where the topology has been thinned — the floor, ceiling, and hidden surfaces lose detail fastest, while surfaces the agent walked past keep their triangulation.
+
+| Original — 112,591 triangles | 50% reduced — 56,261 triangles | 85% reduced — 18,765 triangles |
+|:-:|:-:|:-:|
+| ![Original](doc/images/original_mesh_0pct.jpeg) | ![50% reduced](doc/images/decimated_mesh_50pct.jpeg) | ![85% reduced](doc/images/decimated_mesh_85pct.jpeg) |
+
+---
+
+## Output
+
+Pressing `v` during the interactive session calls `saveSimplifiedMesh`, which writes the mesh to the desktop as `<original_name>_simplified.obj`. The writer (`writeOBJWithMaterialsAndUVs`) preserves:
+
+- `mtllib` reference
+- all `v` positions
+- all `vt` UV coordinates
+- all `vn` normals
+- `f` entries in `v/vt/vn` format
+- `usemtl` directives grouped by material
+
+The original `.mtl` file is copied alongside the output OBJ automatically.
+
+You can press `v` at any point — the mesh is saved at whatever reduction level the animation is currently at. Running the loop to different depths and saving each time produces a full LOD chain from a single run.
 
 ---
 
@@ -118,71 +225,57 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . --config Release
 ```
 
-The compiled binary is placed in `build/bin/`.
+The binary lands in `build/bin/`.  
+All dependencies (libigl, Eigen, GLFW, ImGui, OpenGL) are fetched automatically by CMake. No GPU required.
 
 ---
 
 ## Usage
 
 ```
-./MeshDecimation <input.obj> <weights.txt> [output.obj]
+./703_Decimation_bin <mesh.obj> <weights.txt> [decimation_factor]
 ```
 
-| Argument | Description |
-|----------|-------------|
-| `<input.obj>` | The mesh to simplify (must be manifold; exported from Blender or UE5 as OBJ) |
-| `<weights.txt>` | Per-triangle importance map produced by the OptiX pipeline |
-| `[output.obj]` | Optional output path (can also be saved interactively mid-run) |
+| Argument | Type | Description |
+|---|---|---|
+| `<mesh.obj>` | required | Triangulated, manifold OBJ. Must be a single joined mesh. |
+| `<weights.txt>` | required | Plain-text per-face weight file from the OptiX pipeline. |
+| `[decimation_factor]` | optional, integer ≥ 2 | Target = `F.rows() / factor`. Default is 5 (→ 20% of original). |
 
-The simplification runs iteratively without a fixed target. You can export the mesh at **any intermediate stage**, which makes it straightforward to generate a full LOD hierarchy from a single run.
+The viewer opens with animation **paused**. Controls:
 
----
-
-## Input Requirements
-
-For the pipeline to work correctly:
-
-- **Manifold geometry only.** Each edge must be shared by exactly two faces. Non-manifold edges can be repaired in Blender using the *3D Printing Toolkit* add-on (Mesh → Clean Up → Make Manifold).
-- **Single joined mesh.** All objects must be joined into one unified object in Blender before export (`Ctrl+J`). Separate objects can produce inconsistent importance distributions.
-- **OBJ format.** Other formats (FBX, STL, PLY, OFF) were found to alter face indexing, breaking the per-triangle correspondence between the weight file and the mesh.
+| Key | Action |
+|---|---|
+| `Space` | Start / pause the collapse animation |
+| `v` | Save the mesh at the current reduction level |
+| `r` | Reset to the original mesh |
 
 ---
 
-## File Formats at a Glance
+## Input requirements
 
-| Stage | Format | Why |
-|-------|--------|-----|
-| Visibility analysis | `.gltf` | Encodes scene hierarchy, transforms, and materials in a GPU-friendly structure; native to both OptiX and UE5 |
-| Simplification | `.obj` | Simple, explicit polygonal representation; direct per-vertex / per-face access; most flexible format supported by libigl |
-
----
-
-## Limitations
-
-| Limitation | Detail |
-|-----------|--------|
-| **Offline only** | A ~120k-triangle scene takes ~80 min to reach 90% reduction. The edge-collapse loop is serial; parallelisation is a natural future improvement. |
-| **Static scenes** | Geometry and lighting must remain unchanged during visibility analysis. Moving objects, deformable meshes, and time-varying lighting are not supported. |
-| **Visibility-only importance** | Weights are derived solely from ray hit frequency. Lighting contrast, texture saliency, and motion relevance are not yet incorporated. |
-| **Single-layer occlusion** | Only the first ray intersection is recorded. Translucency and secondary reflections are not modelled. |
-| **GPU requirement (OptiX stage)** | An NVIDIA RTX-capable GPU with CUDA support is required for the companion visibility analysis step. |
+- **Manifold geometry.** Every edge must be shared by exactly two faces. Non-manifold edges cause `collapse_least_cost_edge` to silently skip collapses or corrupt the face table. Repair with Blender's *3D Printing Toolkit* → Mesh → Clean Up → Make Manifold.
+- **Single joined mesh.** All objects joined before OBJ export (`Ctrl+J` in Blender). Separate objects produce misaligned face indices between the OBJ and the weight file.
+- **OBJ format.** The face-index ordering of OBJ is stable across exporters. FBX, STL, PLY, and OFF all reorder faces, breaking the one-to-one correspondence between face `i` in the mesh and line `i` in the weight file.
+- **Weight file length = face count.** The code reads exactly `OF.rows()` values. If the counts differ the weights will be misaligned from the start.
 
 ---
 
-## Related Work
+## Requirements
 
-| Paper | Relevance |
-|-------|-----------|
-| **Xanthopoulos (2021)** — *Evaluation of Illumination-Based Mesh Simplification* | Direct predecessor. Lighting-driven per-primitive importance via multi-pass OptiX ray tracing fed into libigl. |
-| **Liu et al. (2017)** — *Seam erasure and seam-aware decoupling of shape from mesh resolution* | Extended QSlim with texture-seam-aware decimation; informs how UV continuity is maintained. |
-| **Lindstrom & Turk (2000)** — *Image-driven simplification* | Multi-view RMS image metric as edge collapse criterion; early work on removing invisible geometry. |
-| **Garland & Heckbert (1997)** — *Surface Simplification Using Quadric Error Metrics* | Foundational edge-collapse algorithm underlying most modern decimation work, including libigl's. |
+| Dependency | Version | Notes |
+|---|---|---|
+| CMake | ≥ 3.16 | |
+| C++ compiler | C++17 | MSVC 2019+, GCC ≥ 9, Clang ≥ 9 |
+| libigl | 2.5.0 | Header-only; fetched automatically |
+| Eigen3 | — | Fetched automatically |
+| OpenGL + GLFW + ImGui | — | Interactive viewer; fetched automatically |
+
+This repository is **CPU-only**. The companion OptiX repository requires a CUDA-capable RTX GPU.
 
 ---
 
 ## Citation
-
-If you use or build on this work, please cite:
 
 ```bibtex
 @thesis{chrysafi_manetas_2025,
